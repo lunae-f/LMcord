@@ -3,17 +3,33 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import discord
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI
+
+try:
+    from google import genai
+    from google.genai import types
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
+    genai = None
+    types = None
+
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
 
 load_dotenv()
 
-DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-DEFAULT_MODEL = "gemini-3-flash-preview"
+DEFAULT_MODEL_GOOGLE = "gemini-2.0-flash-exp"
+DEFAULT_MODEL_OPENAI = "gpt-4o"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -26,8 +42,8 @@ def env_bool(name: str, default: bool = False) -> bool:
 @dataclass
 class Settings:
     platform: str
-    base_url: str
     model: str
+    base_url: Optional[str]
     channel_history_limit: int
     reply_chain_limit: int
     enable_web_search: bool
@@ -35,17 +51,23 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    platform = os.getenv("OPENAI_PLATFORM", "google")
-    base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_BASE_URL)
-    model = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+    platform = os.getenv("PLATFORM", "google").lower()
+    
+    if platform == "google":
+        default_model = DEFAULT_MODEL_GOOGLE
+    else:
+        default_model = DEFAULT_MODEL_OPENAI
+    
+    model = os.getenv("MODEL", default_model)
+    base_url = os.getenv("OPENAI_BASE_URL") if platform == "openai" else None
     channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "50"))
     reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "50"))
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     return Settings(
         platform=platform,
-        base_url=base_url,
         model=model,
+        base_url=base_url,
         channel_history_limit=channel_history_limit,
         reply_chain_limit=reply_chain_limit,
         enable_web_search=enable_web_search,
@@ -55,16 +77,35 @@ def load_settings() -> Settings:
 
 SETTINGS = load_settings()
 
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is required")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is required")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=SETTINGS.base_url)
+# Initialize API clients based on platform
+genai_client = None
+openai_client = None
+
+if SETTINGS.platform == "google":
+    if not GOOGLE_AVAILABLE:
+        raise RuntimeError("google-genai package is not installed. Install with: pip install google-genai")
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY is required for Google platform")
+    genai_client = genai.Client(api_key=GOOGLE_API_KEY)
+elif SETTINGS.platform == "openai":
+    if not OPENAI_AVAILABLE:
+        raise RuntimeError("openai package is not installed. Install with: pip install openai")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is required for OpenAI platform")
+    openai_client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=SETTINGS.base_url or DEFAULT_BASE_URL
+    )
+else:
+    raise RuntimeError(f"Unsupported platform: {SETTINGS.platform}. Use 'google' or 'openai'")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -123,8 +164,11 @@ def build_help_message() -> str:
     settings_lines = [
         "現在の設定:",
         f"- プラットフォーム: {SETTINGS.platform}",
-        f"- エンドポイント: {SETTINGS.base_url}",
         f"- モデル: {SETTINGS.model}",
+    ]
+    if SETTINGS.base_url:
+        settings_lines.append(f"- エンドポイント: {SETTINGS.base_url}")
+    settings_lines.extend([
         f"- チャンネル履歴参照: {SETTINGS.channel_history_limit}件",
         f"- 返信参照チェーン: {SETTINGS.reply_chain_limit}件",
         f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
@@ -134,7 +178,7 @@ def build_help_message() -> str:
         "使い方:",
         "- @ボット名 質問内容 の形式で呼び出してください。",
         "- 必要に応じてボットがウェブ検索を使います（検索した場合は参照URLを表示）。",
-    ]
+    ])
     return "\n".join(settings_lines)
 
 
@@ -167,9 +211,37 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     return "\n".join(lines)
 
 
-def build_tool_spec() -> List[dict]:
+def build_tool_spec_google() -> List[types.Tool]:
     if not (SETTINGS.enable_web_search and TAVILY_API_KEY):
         return []
+    
+    tavily_search_declaration = types.FunctionDeclaration(
+        name="tavily_search",
+        description="必要に応じてウェブ検索を行い、要約と参照URLを返します。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "検索クエリ",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "取得する結果数",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    )
+    
+    return [types.Tool(function_declarations=[tavily_search_declaration])]
+
+
+def build_tool_spec_openai() -> Optional[List[dict]]:
+    if not (SETTINGS.enable_web_search and TAVILY_API_KEY):
+        return None
+    
     return [
         {
             "type": "function",
@@ -203,7 +275,58 @@ def extract_mention_prompt(content: str, bot_id: int) -> Optional[str]:
     return re.sub(pattern, "", content.strip(), count=1).strip()
 
 
-async def build_messages(message: discord.Message, prompt: str) -> List[dict]:
+async def build_messages(message: discord.Message, prompt: str) -> Union[List[types.Content], List[dict]]:
+    if SETTINGS.platform == "google":
+        return await build_messages_google(message, prompt)
+    else:
+        return await build_messages_openai(message, prompt)
+
+
+async def build_messages_google(message: discord.Message, prompt: str) -> List[types.Content]:
+    contents: List[types.Content] = []
+    
+    # System instruction part
+    system_parts = [build_system_prompt()]
+    
+    # Reply chain
+    reply_chain = await fetch_reply_chain(message, SETTINGS.reply_chain_limit)
+    if reply_chain:
+        lines = ["返信チェーン参照:"]
+        for m in reply_chain:
+            content = format_message_content(m)
+            if content:
+                lines.append(f"- {m.author.display_name}: {content}")
+        system_parts.append("\n".join(lines))
+    
+    # Channel history
+    history = [
+        m
+        async for m in message.channel.history(
+            limit=SETTINGS.channel_history_limit, before=message
+        )
+    ]
+    history.reverse()
+    
+    # Combine system prompt with context
+    combined_system = "\n\n".join(system_parts)
+    contents.append(types.Content(role="user", parts=[types.Part(text=combined_system)]))
+    contents.append(types.Content(role="model", parts=[types.Part(text="了解しました。")]))
+    
+    # Add history
+    for m in history:
+        content_text = format_message_content(m)
+        if content_text:
+            role = "model" if m.author == client.user else "user"
+            author_prefix = "" if m.author == client.user else f"{m.author.display_name}: "
+            contents.append(types.Content(role=role, parts=[types.Part(text=f"{author_prefix}{content_text}")]))
+    
+    # Add current prompt
+    contents.append(types.Content(role="user", parts=[types.Part(text=f"{message.author.display_name}: {prompt}")]))
+    
+    return contents
+
+
+async def build_messages_openai(message: discord.Message, prompt: str) -> List[dict]:
     messages: List[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     reply_chain = await fetch_reply_chain(message, SETTINGS.reply_chain_limit)
@@ -231,14 +354,74 @@ async def build_messages(message: discord.Message, prompt: str) -> List[dict]:
     return messages
 
 
-async def run_llm(messages: List[dict]) -> str:
-    tools = build_tool_spec()
+async def run_llm(messages: Union[List[types.Content], List[dict]]) -> str:
+    if SETTINGS.platform == "google":
+        return await run_llm_google(messages)
+    else:
+        return await run_llm_openai(messages)
+
+
+async def run_llm_google(contents: List[types.Content]) -> str:
+    tools = build_tool_spec_google()
+    
+    response = genai_client.models.generate_content(
+        model=SETTINGS.model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            tools=tools if tools else None,
+        ),
+    )
+    
+    # Check if there are function calls
+    if response.candidates and response.candidates[0].content.parts:
+        first_part = response.candidates[0].content.parts[0]
+        if hasattr(first_part, 'function_call') and first_part.function_call:
+            # Process function calls
+            contents.append(response.candidates[0].content)
+            
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    fc = part.function_call
+                    if fc.name == "tavily_search":
+                        query = fc.args.get("query", "")
+                        max_results = int(fc.args.get("max_results", 5))
+                        tool_result = await tavily_search(query, max_results=max_results)
+                        
+                        # Add function response
+                        contents.append(
+                            types.Content(
+                                role="user",
+                                parts=[
+                                    types.Part(
+                                        function_response=types.FunctionResponse(
+                                            name="tavily_search",
+                                            response={"result": tool_result}
+                                        )
+                                    )
+                                ]
+                            )
+                        )
+            
+            # Get follow-up response
+            follow_up = genai_client.models.generate_content(
+                model=SETTINGS.model,
+                contents=contents,
+            )
+            return follow_up.text or ""
+    
+    return response.text or ""
+
+
+async def run_llm_openai(messages: List[dict]) -> str:
+    tools = build_tool_spec_openai()
+    
     response = openai_client.chat.completions.create(
         model=SETTINGS.model,
         messages=messages,
-        tools=tools or None,
+        tools=tools,
         tool_choice="auto" if tools else None,
     )
+    
     message = response.choices[0].message
 
     if message.tool_calls:
@@ -301,8 +484,8 @@ async def on_message(message: discord.Message) -> None:
 
     await message.channel.typing()
     try:
-        messages = await build_messages(message, prompt)
-        reply = await run_llm(messages)
+        msg_data = await build_messages(message, prompt)
+        reply = await run_llm(msg_data)
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
         await message.channel.send(reply, reference=message)
