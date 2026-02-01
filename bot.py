@@ -48,6 +48,7 @@ class Settings:
     reply_chain_limit: int
     enable_web_search: bool
     search_provider: str
+    enable_google_grounding: bool
 
 
 def load_settings() -> Settings:
@@ -64,6 +65,7 @@ def load_settings() -> Settings:
     reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "50"))
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
+    enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
     return Settings(
         platform=platform,
         model=model,
@@ -72,6 +74,7 @@ def load_settings() -> Settings:
         reply_chain_limit=reply_chain_limit,
         enable_web_search=enable_web_search,
         search_provider=search_provider,
+        enable_google_grounding=enable_google_grounding,
     )
 
 
@@ -212,30 +215,36 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
 
 
 def build_tool_spec_google() -> List[types.Tool]:
-    if not (SETTINGS.enable_web_search and TAVILY_API_KEY):
-        return []
+    tools = []
     
-    tavily_search_declaration = types.FunctionDeclaration(
-        name="tavily_search",
-        description="必要に応じてウェブ検索を行い、要約と参照URLを返します。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "検索クエリ",
+    # Add Grounding with Google Search
+    if SETTINGS.enable_google_grounding:
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
+    
+    # Add Tavily search as fallback
+    if SETTINGS.enable_web_search and TAVILY_API_KEY and not SETTINGS.enable_google_grounding:
+        tavily_search_declaration = types.FunctionDeclaration(
+            name="tavily_search",
+            description="必要に応じてウェブ検索を行い、要約と参照URLを返します。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "検索クエリ",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "取得する結果数",
+                        "default": 5,
+                    },
                 },
-                "max_results": {
-                    "type": "integer",
-                    "description": "取得する結果数",
-                    "default": 5,
-                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-    )
+        )
+        tools.append(types.Tool(function_declarations=[tavily_search_declaration]))
     
-    return [types.Tool(function_declarations=[tavily_search_declaration])]
+    return tools
 
 
 def build_tool_spec_openai() -> Optional[List[dict]]:
@@ -372,7 +381,19 @@ async def run_llm_google(contents: List[types.Content]) -> str:
         ),
     )
     
-    # Check if there are function calls
+    # Extract grounding citations if available
+    grounding_citations = ""
+    if response.candidates and response.candidates[0].grounding_metadata:
+        metadata = response.candidates[0].grounding_metadata
+        if hasattr(metadata, "grounding_chunks") and metadata.grounding_chunks:
+            citations = []
+            for chunk in metadata.grounding_chunks:
+                if hasattr(chunk, "web") and chunk.web:
+                    citations.append(f"- {chunk.web.title}: {chunk.web.uri}")
+            if citations:
+                grounding_citations = "\n\n**参照URL:**\n" + "\n".join(citations)
+    
+    # Check if there are function calls (for Tavily search fallback)
     if response.candidates and response.candidates[0].content.parts:
         first_part = response.candidates[0].content.parts[0]
         if hasattr(first_part, 'function_call') and first_part.function_call:
@@ -407,9 +428,9 @@ async def run_llm_google(contents: List[types.Content]) -> str:
                 model=SETTINGS.model,
                 contents=contents,
             )
-            return follow_up.text or ""
+            return (follow_up.text or "") + grounding_citations
     
-    return response.text or ""
+    return (response.text or "") + grounding_citations
 
 
 async def run_llm_openai(messages: List[dict]) -> str:
