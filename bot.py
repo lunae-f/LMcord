@@ -49,6 +49,7 @@ class Settings:
     enable_web_search: bool
     search_provider: str
     enable_google_grounding: bool
+    persona: Optional[str]
 
 
 def load_settings() -> Settings:
@@ -66,6 +67,7 @@ def load_settings() -> Settings:
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
+    persona = os.getenv("PERSONA")
     return Settings(
         platform=platform,
         model=model,
@@ -75,6 +77,7 @@ def load_settings() -> Settings:
         enable_web_search=enable_web_search,
         search_provider=search_provider,
         enable_google_grounding=enable_google_grounding,
+        persona=persona,
     )
 
 
@@ -118,11 +121,15 @@ client = discord.Client(intents=intents)
 
 
 def build_system_prompt() -> str:
-    return (
-        "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。"
-        "必要に応じてウェブ検索ツールを使ってください。検索を使った場合、必ず参照URLを含めてください。"
-        "推測は避け、分からない場合は分からないと伝えてください。"
-    )
+    base_prompt = "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。"
+    if SETTINGS.enable_web_search or SETTINGS.enable_google_grounding:
+        base_prompt += "\n必要に応じてウェブ検索ツールを使用し、最新の情報を取得してください。"
+    base_prompt += "\n推測を避け、わからない場合はわかりないと伝えてください。"
+    
+    if SETTINGS.persona:
+        base_prompt += f"\n\n【ペルソナ設定】\n{SETTINGS.persona}"
+    
+    return base_prompt
 
 
 def format_message_content(message: discord.Message) -> str:
@@ -177,6 +184,11 @@ def build_help_message() -> str:
         f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
         f"- 検索プロバイダ: {SETTINGS.search_provider}",
         "- スタイル: 日本語/丁寧/正確さ重視",
+    ])
+    if SETTINGS.persona:
+        persona_display = SETTINGS.persona[:50] + "..." if len(SETTINGS.persona) > 50 else SETTINGS.persona
+        settings_lines.append(f"- ペルソナ: {persona_display}")
+    settings_lines.extend([
         "",
         "使い方:",
         "- @ボット名 質問内容 の形式で呼び出してください。",

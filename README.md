@@ -77,9 +77,33 @@ TAVILY_API_KEY=your_tavily_api_key
 - `OPENAI_API_KEY` - OpenAI互換APIキー（PLATFORM=openai時に必須）
 - `MODEL` - 使用するモデル
 - `ENABLE_GOOGLE_GROUNDING` - Google Searchでの情報取得を有効にするか（google使用時）
+- `PERSONA` - ボットのペルソナ・キャラクター設定（オプション）
 - `TAVILY_API_KEY` - Tavily Web検索APIキー（フォールバック検索用）
 - `CHANNEL_HISTORY_LIMIT` - 参照するチャンネル履歴件数（既定: 50）
 - `REPLY_CHAIN_LIMIT` - 参照する返信チェーンの深さ（既定: 50）
+
+## ペルソナ（キャラクター）設定
+環境変数 `PERSONA` でボットのキャラクターや役割を設定できます。
+
+### 使用例
+
+**フレンドリーなアシスタント:**
+```env
+PERSONA=あなたは親切で明るいDiscordアシスタントです。ユーザーの質問に対して、フレンドリーで分かりやすく回答してください。時々絵文字を使って、会話を楽しくします。
+```
+
+**プロフェッショナルなコンサルタント:**
+```env
+PERSONA=You are a professional business consultant. Provide detailed, strategic insights and recommendations. Always maintain a formal and professional tone.
+```
+
+**テック専門家:**
+```env
+PERSONA=あなたはソフトウェアエンジニアです。プログラミングやテクノロジーに関する質問に詳しく丁寧に答えてください。コード例を示す際は、最高の実践法に従ってください。
+```
+
+### ペルソナを設定しない場合
+設定しない場合は、デフォルトのニュートラルなアシスタントモードになります。
 
 ## Discordボットの作成とトークン取得
 1) Discord Developer Portal にアクセスし、新しいアプリを作成します。
