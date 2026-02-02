@@ -234,6 +234,9 @@ client = bot  # For backward compatibility
 
 TOKENS_FILE = "data/tokens_monthly.json"
 
+# Rate limiting
+REQUEST_TIMES: List[datetime] = []
+
 
 def ensure_data_dir() -> None:
     """Ensure data directory exists."""
@@ -267,6 +270,40 @@ def calculate_cost(input_tokens: int, output_tokens: int, profile: Profile) -> f
     input_cost = (input_tokens / 1_000_000) * profile.input_cost_per_1m
     output_cost = (output_tokens / 1_000_000) * profile.output_cost_per_1m
     return round(input_cost + output_cost, 6)
+
+
+def check_rate_limit() -> Optional[str]:
+    """Check if rate limit is exceeded. Returns error message if exceeded, None otherwise."""
+    global REQUEST_TIMES
+    now = datetime.now()
+    cutoff = now.timestamp() - 60
+    REQUEST_TIMES = [t for t in REQUEST_TIMES if t.timestamp() > cutoff]
+    
+    if len(REQUEST_TIMES) >= SETTINGS.max_requests_per_minute:
+        return f"⚠️ レート制限: 1分間に{SETTINGS.max_requests_per_minute}リクエストまでです。少し待ってから再試行してください。"
+    
+    REQUEST_TIMES.append(now)
+    return None
+
+
+def get_cost_warning(tokens_data: dict) -> Optional[str]:
+    """Check if cost warning threshold is reached. Returns warning message if applicable."""
+    if SETTINGS.max_monthly_cost_usd <= 0:
+        return None
+    
+    cost = tokens_data.get("cost", 0.0)
+    cost_ratio = cost / SETTINGS.max_monthly_cost_usd
+    
+    if cost_ratio >= 0.95:
+        return f"🚨 **警告**: 月間コスト上限の95%に達しました ({format_usd_cost(cost)} / {format_usd_cost(SETTINGS.max_monthly_cost_usd)})"
+    elif cost_ratio >= 0.90:
+        return f"⚠️ **警告**: 月間コスト上限の90%に達しました ({format_usd_cost(cost)} / {format_usd_cost(SETTINGS.max_monthly_cost_usd)})"
+    elif cost_ratio >= 0.80:
+        return f"⚠️ 注意: 月間コスト上限の80%に達しました ({format_usd_cost(cost)} / {format_usd_cost(SETTINGS.max_monthly_cost_usd)})"
+    elif cost_ratio >= 0.50:
+        return f"💡 月間コスト上限の50%に達しました ({format_usd_cost(cost)} / {format_usd_cost(SETTINGS.max_monthly_cost_usd)})"
+    
+    return None
 
 
 def update_monthly_tokens(input_tokens: int, output_tokens: int, profile: Profile) -> dict:
@@ -379,6 +416,8 @@ async def build_gemini_file_parts(profile: Profile, attachments: List[discord.At
     client = get_google_client(profile)
     parts: List[types.Part] = []
     estimated_tokens = 0
+    max_retries = 3
+    
     for attachment in attachments:
         estimated_tokens += estimate_attachment_tokens(attachment)
         data = await attachment.read()
@@ -386,18 +425,36 @@ async def build_gemini_file_parts(profile: Profile, attachments: List[discord.At
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(data)
             tmp_path = tmp.name
-        try:
-            uploaded = await asyncio.to_thread(client.files.upload, file=tmp_path)
-        finally:
+        
+        uploaded = None
+        last_error = None
+        for attempt in range(max_retries):
             try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+                uploaded = await asyncio.to_thread(client.files.upload, file=tmp_path)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"ファイルアップロード失敗 (試行 {attempt + 1}/{max_retries}): {attachment.filename} - {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+        
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        
+        if not uploaded:
+            raise RuntimeError(
+                f"ファイルのアップロードに失敗しました（{max_retries}回試行）: {attachment.filename}\n"
+                f"エラー: {last_error}"
+            )
+        
         file_uri = getattr(uploaded, "uri", None) or getattr(uploaded, "file_uri", None)
         mime_type = getattr(uploaded, "mime_type", None) or attachment.content_type or "application/octet-stream"
         if not file_uri:
             raise RuntimeError(f"ファイルのアップロードに失敗しました: {attachment.filename}")
         parts.append(types.Part(file_data=types.FileData(file_uri=file_uri, mime_type=mime_type)))
+    
     return parts, estimated_tokens
 
 
@@ -1005,6 +1062,12 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(build_help_message(message.channel.id))
         return
 
+    # Check rate limit
+    rate_limit_error = check_rate_limit()
+    if rate_limit_error:
+        await message.channel.send(rate_limit_error, reference=message)
+        return
+
     profile = get_active_profile(message.channel.id)
 
     attachments = list(message.attachments or [])
@@ -1071,6 +1134,11 @@ async def on_message(message: discord.Message) -> None:
         # Update monthly token counts and bot status
         tokens_data = update_monthly_tokens(input_tokens, output_tokens, profile)
         await update_bot_status(tokens_data)
+        
+        # Check and send cost warning
+        cost_warning = get_cost_warning(tokens_data)
+        if cost_warning:
+            await message.channel.send(cost_warning)
     except Exception as exc:
         # Log error
         logger.error(f"❌ Error processing message from {message.author.name}: {exc}", exc_info=True)
