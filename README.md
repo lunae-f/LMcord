@@ -142,17 +142,17 @@ python bot.py
 
 ### Docker Compose（推奨）
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ログ確認:
 ```bash
-docker-compose logs -f
+docker compose logs -f
 ```
 
 停止:
 ```bash
-docker-compose down
+docker compose down
 ```
 
 ### Docker（手動ビルド）
