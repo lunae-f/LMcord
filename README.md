@@ -3,34 +3,28 @@
   <img src="readme-media/lmcord-icon.png" alt="LMcord icon" width="260" style="margin-right: 16px;">
   <img src="readme-media/lmcord-demo.png" alt="LMcord demo" width="520">
 </p>
-Discord上で @メンションで呼び出せるLLMボットです。Google Gemini APIまたはOpenAI互換API（OpenAI、OpenRouter等）を使用します。Google Gemini使用時は、Grounding with Google Searchで最新のWeb情報に基づいた正確な回答を提供します。
+Discord上で @メンションで呼び出せるAIボットです。
 
 ## 主な機能
 - `@ボット名 質問` で起動
 - チャンネル履歴参照
 - 返信チェーン参照
-- **Gemini API使用時:** Grounding with Google SearchでのWeb検索に対応
-- **OpenAI API使用時:** 必要に応じてTavilyでのWeb検索に対応
-- 日本語固定・丁寧・正確さ重視
-- Google Gemini / OpenAI / OpenRouter など対応
+- Web検索の呼び出しに対応
+    - **Gemini API使用時:** Grounding with Google SearchであるいはTabilyでのWeb検索
+    - **OpenAI API使用時:** TavilyでのWeb検索に対応
+- Gemini API / OpenAI互換APIに対応
 
 ## サポートするAPI
-### Google Gemini API (PLATFORM=google)
-- 既定のプラットフォーム
+### Google Gemini API (PLATFORM=google) (既定)
 - `GOOGLE_API_KEY` が必要
 - **Grounding with Google Search:** `ENABLE_GOOGLE_GROUNDING=true` で有効（既定で有効）
-  - 実時間のWeb検索で最新情報に基づいた回答
-  - 自動的に参照URLを提示
-  - ハルシネーション（幻覚）を削減
 
 ### OpenAI互換API (PLATFORM=openai)
-- OpenAI
-- OpenRouter
-- その他OpenAI互換API
+- OpenAI、OpenRouter、その他OpenAI互換API
 - `OPENAI_API_KEY` と `OPENAI_BASE_URL` が必要
 
 ## セットアップ
-Dockerをおすすめします。Dockerでデプロイする場合は手順(1)は不要です。
+Dockerをおすすめします。Dockerでデプロイする場合、手順(1)は不要です。
 
 1) 依存関係のインストール（ローカルでデプロイする場合）
 ```bash
@@ -49,6 +43,7 @@ ENABLE_GOOGLE_GROUNDING=true
 ```
 
 ### Google Grounding with Google Searchを無効にする場合
+Gemini APIのFree Tierでは、本機能は使用できませんから無効にしてください。
 ```env
 ENABLE_GOOGLE_GROUNDING=false
 ENABLE_WEB_SEARCH=true
@@ -89,8 +84,6 @@ TAVILY_API_KEY=your_tavily_api_key
 
 ## ペルソナ（キャラクター）設定
 環境変数 `PERSONA` でボットのキャラクターや役割を設定できます。
-
-設定しない場合は、デフォルトのニュートラルなアシスタントモードになります。
 
 ## Discordボットの作成とトークン取得
 1) Discord Developer Portal にアクセスし、新しいアプリを作成します。
@@ -181,16 +174,6 @@ Discordで以下のように呼び出してください。
 ```
 
 また、空入力の場合は現在の設定値とヘルプを返します。
-
-## Grounding with Google Searchについて
-Google Gemini APIを使用する場合、`ENABLE_GOOGLE_GROUNDING=true`で以下が有効になります：
-
-- **実時間検索:** モデルが最新のWeb情報にアクセス
-- **自動引用:** 回答の根拠となるWebサイトを自動的に表示
-- **ハルシネーション削減:** 古い知識に基づく誤った回答を減らす
-- **日本語対応:** 日本語での質問と回答に完全対応
-
-Gemini APIのFree Tierを使用する場合、本機能は使用できませんから無効にしてください。
 
 ---
 Made with ❤️‍🔥 by Lunae.
