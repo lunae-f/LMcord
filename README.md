@@ -1,5 +1,8 @@
-# llm on discord
-
+# LMcord
+<p align="center">
+  <img src="readme-media/lmcord-icon.png" alt="LMcord icon" width="260" style="margin-right: 16px;">
+  <img src="readme-media/lmcord-demo.png" alt="LMcord demo" width="520">
+</p>
 Discord上で @メンションで呼び出せるLLMボットです。Google Gemini APIまたはOpenAI互換API（OpenAI、OpenRouter等）を使用します。Google Gemini使用時は、Grounding with Google Searchで最新のWeb情報に基づいた正確な回答を提供します。
 
 ## 主な機能
@@ -201,3 +204,5 @@ Google Gemini APIを使用する場合、`ENABLE_GOOGLE_GROUNDING=true`で以下
 - **ハルシネーション削減:** 古い知識に基づく誤った回答を減らす
 - **日本語対応:** 日本語での質問と回答に完全対応
 
+---
+Made with ❤️‍🔥 by Lunae.
