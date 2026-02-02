@@ -7,10 +7,10 @@ Discord上で @メンションで呼び出せるLLMボットです。Google Gemi
 
 ## 主な機能
 - `@ボット名 質問` で起動
-- チャンネル履歴50件参照
-- 返信チェーン最大50件参照
-- **Google Gemini使用時:** Grounding with Google Searchで実時間のWeb検索に対応
-- **OpenAI互換使用時:** 必要に応じてTavilyでWeb検索（参照URL必須）
+- チャンネル履歴参照
+- 返信チェーン参照
+- **Gemini API使用時:** Grounding with Google SearchでのWeb検索に対応
+- **OpenAI API使用時:** 必要に応じてTavilyでのWeb検索に対応
 - 日本語固定・丁寧・正確さ重視
 - Google Gemini / OpenAI / OpenRouter など対応
 
@@ -26,11 +26,13 @@ Discord上で @メンションで呼び出せるLLMボットです。Google Gemi
 ### OpenAI互換API (PLATFORM=openai)
 - OpenAI
 - OpenRouter
-- その他OpenAI互換のプロバイダ
+- その他OpenAI互換API
 - `OPENAI_API_KEY` と `OPENAI_BASE_URL` が必要
 
 ## セットアップ
-1) 依存関係のインストール
+Dockerをおすすめします。Dockerでデプロイする場合は手順(1)は不要です。
+
+1) 依存関係のインストール（ローカルでデプロイする場合）
 ```bash
 pip install -r requirements.txt
 ```
@@ -88,24 +90,6 @@ TAVILY_API_KEY=your_tavily_api_key
 ## ペルソナ（キャラクター）設定
 環境変数 `PERSONA` でボットのキャラクターや役割を設定できます。
 
-### 使用例
-
-**フレンドリーなアシスタント:**
-```env
-PERSONA=あなたは親切で明るいDiscordアシスタントです。ユーザーの質問に対して、フレンドリーで分かりやすく回答してください。時々絵文字を使って、会話を楽しくします。
-```
-
-**プロフェッショナルなコンサルタント:**
-```env
-PERSONA=You are a professional business consultant. Provide detailed, strategic insights and recommendations. Always maintain a formal and professional tone.
-```
-
-**テック専門家:**
-```env
-PERSONA=あなたはソフトウェアエンジニアです。プログラミングやテクノロジーに関する質問に詳しく丁寧に答えてください。コード例を示す際は、最高の実践法に従ってください。
-```
-
-### ペルソナを設定しない場合
 設定しない場合は、デフォルトのニュートラルなアシスタントモードになります。
 
 ## Discordボットの作成とトークン取得
@@ -187,6 +171,8 @@ Discordで以下のように呼び出してください。
 @ボット名 質問内容
 ```
 
+呼び出したチャンネルの直近の会話や返信チェーンも読み込んで応答します。
+
 ### 使用例
 ```
 @LLMcord 東京の今の天気は？
@@ -194,7 +180,7 @@ Discordで以下のように呼び出してください。
 @LLMcord 2024年のノーベル賞受賞者は？
 ```
 
-空入力の場合は現在の設定値とヘルプを返します。
+また、空入力の場合は現在の設定値とヘルプを返します。
 
 ## Grounding with Google Searchについて
 Google Gemini APIを使用する場合、`ENABLE_GOOGLE_GROUNDING=true`で以下が有効になります：
@@ -203,6 +189,8 @@ Google Gemini APIを使用する場合、`ENABLE_GOOGLE_GROUNDING=true`で以下
 - **自動引用:** 回答の根拠となるWebサイトを自動的に表示
 - **ハルシネーション削減:** 古い知識に基づく誤った回答を減らす
 - **日本語対応:** 日本語での質問と回答に完全対応
+
+Gemini APIのFree Tierを使用する場合、本機能は使用できませんから無効にしてください。
 
 ---
 Made with ❤️‍🔥 by Lunae.
