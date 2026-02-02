@@ -51,6 +51,7 @@ class Settings:
     enable_google_grounding: bool
     persona: Optional[str]
     enable_citation_links: bool
+    embed_footer: str
 
 
 def load_settings() -> Settings:
@@ -70,6 +71,7 @@ def load_settings() -> Settings:
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
     persona = os.getenv("PERSONA")
     enable_citation_links = env_bool("ENABLE_CITATION_LINKS", False)
+    embed_footer = os.getenv("EMBED_FOOTER", "[LMcord](https://github.com/lunae-f/LMcord), made with ❤️‍🔥 by Lunae. | MIT License")
     return Settings(
         platform=platform,
         model=model,
@@ -81,6 +83,7 @@ def load_settings() -> Settings:
         enable_google_grounding=enable_google_grounding,
         persona=persona,
         enable_citation_links=enable_citation_links,
+        embed_footer=embed_footer,
     )
 
 
@@ -411,14 +414,14 @@ async def build_messages_openai(message: discord.Message, prompt: str) -> List[d
     return messages
 
 
-async def run_llm(messages: Union[List[types.Content], List[dict]]) -> str:
+async def run_llm(messages: Union[List[types.Content], List[dict]]) -> tuple[str, int, int]:
     if SETTINGS.platform == "google":
         return await run_llm_google(messages)
     else:
         return await run_llm_openai(messages)
 
 
-async def run_llm_google(contents: List[types.Content]) -> str:
+async def run_llm_google(contents: List[types.Content]) -> tuple[str, int, int]:
     tools = build_tool_spec_google()
     
     response = genai_client.models.generate_content(
@@ -428,6 +431,13 @@ async def run_llm_google(contents: List[types.Content]) -> str:
             tools=tools if tools else None,
         ),
     )
+    
+    # Get usage data
+    input_tokens = 0
+    output_tokens = 0
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        input_tokens = response.usage_metadata.prompt_token_count or 0
+        output_tokens = response.usage_metadata.candidates_token_count or 0
     
     # Extract grounding citations if available
     grounding_citations = ""
@@ -476,12 +486,16 @@ async def run_llm_google(contents: List[types.Content]) -> str:
                 model=SETTINGS.model,
                 contents=contents,
             )
-            return (follow_up.text or "") + grounding_citations
+            # Update token counts for follow-up
+            if hasattr(follow_up, 'usage_metadata') and follow_up.usage_metadata:
+                input_tokens += follow_up.usage_metadata.prompt_token_count or 0
+                output_tokens += follow_up.usage_metadata.candidates_token_count or 0
+            return (follow_up.text or "") + grounding_citations, input_tokens, output_tokens
     
-    return (response.text or "") + grounding_citations
+    return (response.text or "") + grounding_citations, input_tokens, output_tokens
 
 
-async def run_llm_openai(messages: List[dict]) -> str:
+async def run_llm_openai(messages: List[dict]) -> tuple[str, int, int]:
     tools = build_tool_spec_openai()
     
     response = openai_client.chat.completions.create(
@@ -490,6 +504,10 @@ async def run_llm_openai(messages: List[dict]) -> str:
         tools=tools,
         tool_choice="auto" if tools else None,
     )
+    
+    # Get usage data
+    input_tokens = response.usage.prompt_tokens if response.usage else 0
+    output_tokens = response.usage.completion_tokens if response.usage else 0
     
     message = response.choices[0].message
 
@@ -526,9 +544,13 @@ async def run_llm_openai(messages: List[dict]) -> str:
             model=SETTINGS.model,
             messages=messages,
         )
-        return follow_up.choices[0].message.content or ""
+        # Accumulate token counts from follow-up
+        if follow_up.usage:
+            input_tokens += follow_up.usage.prompt_tokens
+            output_tokens += follow_up.usage.completion_tokens
+        return follow_up.choices[0].message.content or "", input_tokens, output_tokens
 
-    return message.content or ""
+    return message.content or "", input_tokens, output_tokens
 
 
 @client.event
@@ -554,15 +576,23 @@ async def on_message(message: discord.Message) -> None:
     await message.channel.typing()
     try:
         msg_data = await build_messages(message, prompt)
-        reply = await run_llm(msg_data)
+        reply, input_tokens, output_tokens = await run_llm(msg_data)
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
+        
         chunks = split_discord_message(reply)
         for i, chunk in enumerate(chunks):
             if i == 0:
                 await message.channel.send(chunk, reference=message)
             else:
                 await message.channel.send(chunk)
+        
+        # Send token count as an embed
+        embed = discord.Embed(
+            color=discord.Color.greyple(),
+            description=f"Tokens: {input_tokens}/{output_tokens}\n{SETTINGS.embed_footer}"
+        )
+        await message.channel.send(embed=embed)
     except Exception as exc:
         await message.channel.send(
             f"エラーが発生しました: {exc}", reference=message
