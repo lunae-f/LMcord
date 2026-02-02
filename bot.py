@@ -949,6 +949,44 @@ async def llmcord_switch(interaction: discord.Interaction, profile: str):
         await interaction.response.send_message(f"切り替えに失敗しました: {exc}", ephemeral=True)
 
 
+@lmcord_group.command(name="stats", description="月次統計情報を表示")
+async def llmcord_stats(interaction: discord.Interaction):
+    tokens_data = load_monthly_tokens()
+    month = tokens_data.get("month", "N/A")
+    input_tokens = tokens_data.get("input", 0)
+    output_tokens = tokens_data.get("output", 0)
+    cost = tokens_data.get("cost", 0.0)
+    requests = tokens_data.get("requests", 0)
+    
+    cost_str = format_usd_cost(cost)
+    jpy_str = format_jpy_cost(cost, SETTINGS.usd_to_jpy_rate)
+    input_token_str = format_token_count(input_tokens)
+    output_token_str = format_token_count(output_tokens)
+    
+    avg_input = input_tokens // requests if requests > 0 else 0
+    avg_output = output_tokens // requests if requests > 0 else 0
+    avg_cost = cost / requests if requests > 0 else 0.0
+    avg_input_str = format_token_count(avg_input)
+    avg_output_str = format_token_count(avg_output)
+    avg_cost_str = format_usd_cost(avg_cost)
+    avg_jpy_str = format_jpy_cost(avg_cost, SETTINGS.usd_to_jpy_rate)
+    
+    stats_lines = [
+        f"📊 月次統計情報 ({month})",
+        "",
+        f"💸 総コスト: {cost_str} {jpy_str}",
+        f"📥 総入力トークン: {input_token_str}",
+        f"📤 総出力トークン: {output_token_str}",
+        f"📋 総リクエスト数: {requests}",
+        "",
+        f"💸 平均コスト: {avg_cost_str} {avg_jpy_str}",
+        f"📥 平均入力トークン: {avg_input_str}",
+        f"📤 平均出力トークン: {avg_output_str}",
+    ]
+    
+    await interaction.response.send_message("\n".join(stats_lines), ephemeral=True)
+
+
 bot.tree.add_command(lmcord_group)
 
 
