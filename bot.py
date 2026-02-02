@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import List, Optional, Union
 
 import discord
+from discord import app_commands
+from discord.ext import commands
 import requests
 from dotenv import load_dotenv
 
@@ -132,7 +134,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
+client = bot  # For backward compatibility
 
 TOKENS_FILE = "data/tokens_monthly.json"
 
@@ -185,7 +188,7 @@ async def update_bot_status(tokens_data: dict) -> None:
         return
     activity = discord.Activity(
         type=discord.ActivityType.playing,
-        name=f"💎 {tokens_data['input']:,} in / {tokens_data['output']:,} out in this month."
+        name=f"💎 {tokens_data['input']:,} IN / {tokens_data['output']:,} OUT in this month."
     )
     await client.change_presence(activity=activity)
 
@@ -623,6 +626,25 @@ async def on_ready() -> None:
     # Set initial status
     tokens_data = load_monthly_tokens()
     await update_bot_status(tokens_data)
+    
+    # Sync slash commands
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logger.error(f"Failed to sync commands: {e}")
+
+
+@bot.tree.command(name="llmcord", description="LMcordの設定とヘルプを表示")
+@app_commands.describe(action="実行するアクション")
+@app_commands.choices(action=[
+    app_commands.Choice(name="help", value="help")
+])
+async def llmcord_command(interaction: discord.Interaction, action: str):
+    """LMcord slash command handler."""
+    if action == "help":
+        help_text = build_help_message()
+        await interaction.response.send_message(help_text, ephemeral=True)
 
 
 @client.event
@@ -679,7 +701,7 @@ async def on_message(message: discord.Message) -> None:
 
 
 async def main() -> None:
-    await client.start(DISCORD_TOKEN)
+    await bot.start(DISCORD_TOKEN)
 
 
 if __name__ == "__main__":
