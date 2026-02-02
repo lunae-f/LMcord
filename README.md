@@ -1,7 +1,7 @@
 # LMcord
 <p align="center">
   <img src="readme-media/lmcord-icon.png" alt="LMcord icon" width="260" style="margin-right: 16px;">
-  <img src="readme-media/lmcord-demo.png" alt="LMcord demo" width="520">
+  <img src="readme-media/lmcord-demo.jpeg" alt="LMcord demo" width="520">
 </p>
 Discord上で @メンションで呼び出せるAIボットです。
 
