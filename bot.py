@@ -14,7 +14,6 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-import requests
 from dotenv import load_dotenv
 
 try:
@@ -72,8 +71,8 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "15"))
-    reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "15"))
+    channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "50"))
+    reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "50"))
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
@@ -116,6 +115,7 @@ class Profile:
 
 
 PROFILES_FILE = "profiles.json"
+CHANNEL_PROFILES_FILE = "data/channel_profiles.json"
 PROFILES: dict[str, Profile] = {}
 ACTIVE_PROFILE_NAME: Optional[str] = None
 CHANNEL_PROFILE_OVERRIDES: dict[int, str] = {}
@@ -154,7 +154,8 @@ def load_profiles() -> None:
         if platform not in {"google", "openai"}:
             raise RuntimeError(f"Unsupported platform in profile '{name}': {platform}")
         if not api_key:
-            logger.warning(f"⚠️ プロファイル '{name}' のAPIキーが設定されていません。このプロファイルは利用できません。")
+            logger.warning(f"⚠️ プロファイル '{name}' のAPIキーが未設定のためスキップします")
+            continue
         loaded[name] = Profile(
             name=name,
             platform=platform,
@@ -165,6 +166,8 @@ def load_profiles() -> None:
             output_cost_per_1m=output_cost,
         )
     PROFILES = loaded
+    if not PROFILES:
+        raise RuntimeError("有効なAPIキーを持つプロファイルが見つかりません")
     ACTIVE_PROFILE_NAME = active_name or next(iter(loaded.keys()))
     if ACTIVE_PROFILE_NAME not in PROFILES:
         raise RuntimeError(f"active_profile '{ACTIVE_PROFILE_NAME}' not found in profiles.json")
@@ -180,10 +183,35 @@ def get_active_profile(channel_id: Optional[int] = None) -> Profile:
     return PROFILES[ACTIVE_PROFILE_NAME]
 
 
+def load_channel_profiles() -> None:
+    """Load channel profile overrides from file."""
+    global CHANNEL_PROFILE_OVERRIDES
+    if not os.path.exists(CHANNEL_PROFILES_FILE):
+        return
+    try:
+        with open(CHANNEL_PROFILES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            CHANNEL_PROFILE_OVERRIDES = {int(k): v for k, v in data.items()}
+            logger.info(f"チャンネルプロファイル設定を読み込みました: {len(CHANNEL_PROFILE_OVERRIDES)}件")
+    except Exception as e:
+        logger.error(f"チャンネルプロファイルの読み込みに失敗しました: {e}")
+
+
+def save_channel_profiles() -> None:
+    """Save channel profile overrides to file."""
+    ensure_data_dir()
+    try:
+        with open(CHANNEL_PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump(CHANNEL_PROFILE_OVERRIDES, f)
+    except Exception as e:
+        logger.error(f"チャンネルプロファイルの保存に失敗しました: {e}")
+
+
 def set_channel_profile(channel_id: int, profile_name: str) -> None:
     if profile_name not in PROFILES:
         raise RuntimeError(f"Unknown profile: {profile_name}")
     CHANNEL_PROFILE_OVERRIDES[channel_id] = profile_name
+    save_channel_profiles()
 
 
 def list_profiles() -> List[str]:
@@ -199,6 +227,7 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is required")
 
 load_profiles()
+load_channel_profiles()
 
 GOOGLE_CLIENTS: dict[str, genai.Client] = {}
 OPENAI_CLIENTS: dict[tuple[str, str], OpenAI] = {}
@@ -240,9 +269,19 @@ TOKENS_FILE = "data/tokens_monthly.json"
 
 # Rate limiting (per user)
 REQUEST_TIMES: dict[int, deque[datetime]] = {}
+LAST_CLEANUP = datetime.now()
 
 # Token update lock
 TOKENS_LOCK = asyncio.Lock()
+
+# Concurrent execution limits
+MAX_CONCURRENT_LLM_CALLS = 5  # Maximum concurrent LLM API calls
+MAX_CONCURRENT_FILE_UPLOADS = 3  # Maximum concurrent file uploads
+LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+FILE_UPLOAD_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+# Global aiohttp session
+AIOHTTP_SESSION: Optional[aiohttp.ClientSession] = None
 
 
 def ensure_data_dir() -> None:
@@ -253,13 +292,29 @@ def ensure_data_dir() -> None:
 def load_monthly_tokens() -> dict:
     """Load monthly token counts from file."""
     ensure_data_dir()
+    default_data = {"month": "", "input": 0, "output": 0, "cost": 0.0, "requests": 0}
+    
     if not os.path.exists(TOKENS_FILE):
-        return {"month": "", "input": 0, "output": 0, "cost": 0.0, "requests": 0}
+        return default_data
+    
     try:
         with open(TOKENS_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"month": "", "input": 0, "output": 0, "cost": 0.0, "requests": 0}
+            data = json.load(f)
+            # Validate schema
+            required_keys = ["month", "input", "output", "cost", "requests"]
+            if not all(key in data for key in required_keys):
+                logger.warning(f"トークンファイルのスキーマが不完全です。デフォルト値を使用します。")
+                return default_data
+            return data
+    except json.JSONDecodeError as e:
+        logger.error(f"トークンファイルのJSON解析に失敗しました: {e}")
+        return default_data
+    except PermissionError as e:
+        logger.error(f"トークンファイルの読み込み権限がありません: {e}")
+        return default_data
+    except Exception as e:
+        logger.error(f"トークンファイルの読み込みに失敗しました: {e}")
+        return default_data
 
 
 def save_monthly_tokens(data: dict) -> None:
@@ -268,8 +323,8 @@ def save_monthly_tokens(data: dict) -> None:
     try:
         with open(TOKENS_FILE, "w") as f:
             json.dump(data, f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"トークン情報の保存に失敗しました: {e}")
 
 
 def calculate_cost(input_tokens: int, output_tokens: int, profile: Profile) -> float:
@@ -281,8 +336,18 @@ def calculate_cost(input_tokens: int, output_tokens: int, profile: Profile) -> f
 
 def check_rate_limit(user_id: int) -> Optional[str]:
     """Check if user has exceeded rate limit. Returns error message if exceeded, None otherwise."""
+    global LAST_CLEANUP
+    
     now = datetime.now()
     cutoff = now.timestamp() - 60
+    
+    # 1日1回クリーンアップ（メモリリーク対策）
+    if (now - LAST_CLEANUP).total_seconds() > 86400:
+        old_ids = [uid for uid, times in REQUEST_TIMES.items() if not times]
+        for uid in old_ids:
+            del REQUEST_TIMES[uid]
+        LAST_CLEANUP = now
+        logger.debug(f"Rate limit cleanup: removed {len(old_ids)} empty user entries")
     
     if user_id not in REQUEST_TIMES:
         REQUEST_TIMES[user_id] = deque()
@@ -360,7 +425,7 @@ def build_system_prompt() -> str:
     base_prompt = "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。"
     if SETTINGS.enable_web_search or SETTINGS.enable_google_grounding:
         base_prompt += "\n必要に応じてウェブ検索ツールを使用し、最新の情報を取得してください。"
-    base_prompt += "\n推測を避け、わからない場合はわかりないと伝えてください。"
+    base_prompt += "\n推測を避け、わからない場合はわからないと伝えてください。"
     
     return base_prompt
 
@@ -430,6 +495,13 @@ async def build_gemini_file_parts(profile: Profile, attachments: List[discord.At
     estimated_tokens = 0
     max_retries = 3
     
+    # Non-retryable error patterns
+    non_retryable_errors = (
+        "401", "unauthorized", "invalid api key",
+        "403", "forbidden", "permission denied",
+        "422", "unprocessable", "invalid file"
+    )
+    
     for attachment in attachments:
         estimated_tokens += estimate_attachment_tokens(attachment)
         data = await attachment.read()
@@ -440,20 +512,30 @@ async def build_gemini_file_parts(profile: Profile, attachments: List[discord.At
         
         uploaded = None
         last_error = None
-        for attempt in range(max_retries):
-            try:
-                uploaded = await asyncio.to_thread(client.files.upload, file=tmp_path)
-                break
-            except Exception as e:
-                last_error = e
-                logger.warning(f"ファイルアップロード失敗 (試行 {attempt + 1}/{max_retries}): {attachment.filename} - {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-        
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+            for attempt in range(max_retries):
+                try:
+                    async with FILE_UPLOAD_SEMAPHORE:
+                        uploaded = await asyncio.to_thread(client.files.upload, file=tmp_path)
+                    break
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e).lower()
+                    
+                    # Check if error is non-retryable
+                    if any(pattern in error_str for pattern in non_retryable_errors):
+                        logger.error(f"ファイルアップロード即座失敗（リトライ不可）: {attachment.filename} - {e}")
+                        break
+                    
+                    logger.warning(f"ファイルアップロード失敗 (試行 {attempt + 1}/{max_retries}): {attachment.filename} - {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+        finally:
+            # 確実に一時ファイルを削除
+            try:
+                os.remove(tmp_path)
+            except OSError as e:
+                logger.warning(f"一時ファイルの削除に失敗しました: {tmp_path} - {e}")
         
         if not uploaded:
             raise RuntimeError(
@@ -622,21 +704,23 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return "Tavily APIキーが設定されていません。"
     
+    if not AIOHTTP_SESSION:
+        return "HTTPセッションが初期化されていません。"
+    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": TAVILY_API_KEY,
-                    "query": query,
-                    "max_results": max_results,
-                    "include_answer": True,
-                    "include_raw_content": False,
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
+        async with AIOHTTP_SESSION.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "max_results": max_results,
+                "include_answer": True,
+                "include_raw_content": False,
+            },
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
     except Exception as e:
         logger.error(f"Tavily検索エラー: {e}")
         return f"検索に失敗しました: {e}"
@@ -826,14 +910,15 @@ async def run_llm_google(contents: List[types.Content], profile: Profile, estima
     client = get_google_client(profile)
     used_estimate = False
     
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=profile.model,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            tools=tools if tools else None,
-        ),
-    )
+    async with LLM_SEMAPHORE:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=profile.model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                tools=tools if tools else None,
+            ),
+        )
     
     # Get usage data
     input_tokens = 0
@@ -893,11 +978,12 @@ async def run_llm_google(contents: List[types.Content], profile: Profile, estima
                         )
             
             # Get follow-up response
-            follow_up = await asyncio.to_thread(
-                client.models.generate_content,
-                model=profile.model,
-                contents=contents,
-            )
+            async with LLM_SEMAPHORE:
+                follow_up = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=profile.model,
+                    contents=contents,
+                )
             # Update token counts for follow-up
             if hasattr(follow_up, 'usage_metadata') and follow_up.usage_metadata:
                 input_tokens += follow_up.usage_metadata.prompt_token_count or 0
@@ -915,13 +1001,14 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
     tools = build_tool_spec_openai()
     client = get_openai_client(profile)
     
-    response = await asyncio.to_thread(
-        client.chat.completions.create,
-        model=profile.model,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto" if tools else None,
-    )
+    async with LLM_SEMAPHORE:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=profile.model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto" if tools else None,
+        )
     
     # Get usage data
     input_tokens = response.usage.prompt_tokens if response.usage else 0
@@ -958,11 +1045,12 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
                         "content": tool_result,
                     }
                 )
-        follow_up = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=profile.model,
-            messages=messages,
-        )
+        async with LLM_SEMAPHORE:
+            follow_up = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=profile.model,
+                messages=messages,
+            )
         # Accumulate token counts from follow-up
         if follow_up.usage:
             input_tokens += follow_up.usage.prompt_tokens
@@ -974,6 +1062,15 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
 
 @client.event
 async def on_ready() -> None:
+    global LLM_SEMAPHORE, FILE_UPLOAD_SEMAPHORE, AIOHTTP_SESSION
+    
+    # Initialize semaphores
+    LLM_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+    FILE_UPLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_FILE_UPLOADS)
+    
+    # Initialize global aiohttp session
+    AIOHTTP_SESSION = aiohttp.ClientSession()
+    
     print(f"Logged in as {client.user}")
     # Set initial status
     tokens_data = load_monthly_tokens()
@@ -1091,6 +1188,18 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(rate_limit_error, reference=message)
         return
 
+    # Check monthly cost limit
+    if SETTINGS.max_monthly_cost_usd > 0:
+        tokens_data = load_monthly_tokens()
+        cost_ratio = tokens_data["cost"] / SETTINGS.max_monthly_cost_usd
+        if cost_ratio >= 1.0:
+            await message.channel.send(
+                f"🚨 月間コスト上限({format_usd_cost(SETTINGS.max_monthly_cost_usd)})に達しました。"
+                "新しいリクエストは受け付けていません。",
+                reference=message
+            )
+            return
+
     profile = get_active_profile(message.channel.id)
 
     attachments = list(message.attachments or [])
@@ -1172,7 +1281,12 @@ async def on_message(message: discord.Message) -> None:
 
 
 async def main() -> None:
-    await bot.start(DISCORD_TOKEN)
+    try:
+        await bot.start(DISCORD_TOKEN)
+    finally:
+        # Cleanup global aiohttp session
+        if AIOHTTP_SESSION and not AIOHTTP_SESSION.closed:
+            await AIOHTTP_SESSION.close()
 
 
 if __name__ == "__main__":
