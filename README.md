@@ -13,6 +13,7 @@ Discord上で @メンションで呼び出せるAIボットです。
     - **Gemini API使用時:** Grounding with Google SearchであるいはTabilyでのWeb検索
     - **OpenAI API使用時:** TavilyでのWeb検索に対応
 - Gemini API / OpenAI互換APIに対応
+- **Gemini API使用時:** 画像・PDF・テキストの添付解析（Files API使用）
 
 ## サポートするAPI
 ### Google Gemini API (PLATFORM=google) (既定)
@@ -81,6 +82,8 @@ TAVILY_API_KEY=your_tavily_api_key
 - `TAVILY_API_KEY` - Tavily Web検索APIキー（フォールバック検索用）
 - `CHANNEL_HISTORY_LIMIT` - 参照するチャンネル履歴件数（既定: 15）
 - `REPLY_CHAIN_LIMIT` - 参照する返信チェーンの深さ（既定: 15）
+- `MAX_ATTACHMENTS_PER_MESSAGE` - 1メッセージあたりの添付上限（既定: 10）
+- `MAX_ATTACHMENT_SIZE_MB` - 添付1件あたりの最大サイズ（MB, 既定: 10）
 
 ## ペルソナ（キャラクター）設定
 環境変数 `PERSONA` でボットのキャラクターや役割を設定できます。
@@ -165,6 +168,11 @@ Discordで以下のように呼び出してください。
 ```
 
 呼び出したチャンネルの直近の会話や返信チェーンも読み込んで応答します。
+
+### 添付ファイルについて
+- **Gemini API使用時:** 画像・PDF・テキストの添付に対応（Files API使用）
+- **OpenAI互換API使用時:** 添付ファイル入力は非対応（添付があるとエラーで停止）
+- **制限:** 1メッセージあたり最大10件、10MB/件
 
 ### 使用例
 ```

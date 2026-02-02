@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Union
@@ -62,6 +64,9 @@ class Settings:
     embed_footer: str
     max_monthly_cost_usd: float
     max_requests_per_minute: int
+    max_attachments_per_message: int
+    max_attachment_size_mb: int
+    usd_to_jpy_rate: float
 
 
 def load_settings() -> Settings:
@@ -75,6 +80,9 @@ def load_settings() -> Settings:
     embed_footer = os.getenv("EMBED_FOOTER", "[LMcord](https://github.com/lunae-f/LMcord), made with ❤️‍🔥 by Lunae. | MIT License")
     max_monthly_cost_usd = float(os.getenv("MAX_MONTHLY_COST_USD", "0"))
     max_requests_per_minute = int(os.getenv("MAX_REQUESTS_PER_MINUTE", "10"))
+    max_attachments_per_message = int(os.getenv("MAX_ATTACHMENTS_PER_MESSAGE", "10"))
+    max_attachment_size_mb = int(os.getenv("MAX_ATTACHMENT_SIZE_MB", "10"))
+    usd_to_jpy_rate = float(os.getenv("USD_TO_JPY_RATE", "150"))
     return Settings(
         channel_history_limit=channel_history_limit,
         reply_chain_limit=reply_chain_limit,
@@ -86,6 +94,9 @@ def load_settings() -> Settings:
         embed_footer=embed_footer,
         max_monthly_cost_usd=max_monthly_cost_usd,
         max_requests_per_minute=max_requests_per_minute,
+        max_attachments_per_message=max_attachments_per_message,
+        max_attachment_size_mb=max_attachment_size_mb,
+        usd_to_jpy_rate=usd_to_jpy_rate,
     )
 
 
@@ -280,9 +291,13 @@ async def update_bot_status(tokens_data: dict) -> None:
     if not client.user:
         return
     cost = tokens_data.get("cost", 0.0)
+    cost_str = format_usd_cost(cost)
+    jpy_str = format_jpy_cost(cost, SETTINGS.usd_to_jpy_rate)
+    input_token_str = format_token_count(tokens_data['input'])
+    output_token_str = format_token_count(tokens_data['output'])
     activity = discord.Activity(
         type=discord.ActivityType.playing,
-        name=f"💎 ${cost:.4f} | {tokens_data['input']} IN / {tokens_data['output']} OUT"
+        name=f"💸 {cost_str} {jpy_str} | 📥 {input_token_str} • 📤 {output_token_str}"
     )
     await client.change_presence(activity=activity)
 
@@ -304,9 +319,136 @@ def build_system_prompt() -> str:
 def format_message_content(message: discord.Message) -> str:
     parts = [message.content.strip()] if message.content else []
     if message.attachments:
-        parts.extend(a.url for a in message.attachments)
+        parts.extend(
+            f"[添付] {a.filename} ({format_file_size(a.size)})" for a in message.attachments
+        )
     content = "\n".join(p for p in parts if p)
     return content
+
+
+def format_file_size(size_bytes: int) -> str:
+    size_mb = size_bytes / (1024 * 1024)
+    return f"{size_mb:.2f}MB"
+
+
+def estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / 4))
+
+
+def estimate_image_tokens(width: Optional[int], height: Optional[int]) -> int:
+    if not width or not height:
+        return 258
+    if width <= 384 and height <= 384:
+        return 258
+    tiles_x = math.ceil(width / 768)
+    tiles_y = math.ceil(height / 768)
+    return 258 * tiles_x * tiles_y
+
+
+def estimate_attachment_tokens(attachment: discord.Attachment) -> int:
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        return estimate_image_tokens(attachment.width, attachment.height)
+    if attachment.width and attachment.height:
+        return estimate_image_tokens(attachment.width, attachment.height)
+    return max(1, math.ceil(attachment.size / 4))
+
+
+def format_attachment_list(attachments: List[discord.Attachment]) -> str:
+    return ", ".join(
+        f"{a.filename} ({format_file_size(a.size)})" for a in attachments
+    )
+
+
+def validate_attachments(attachments: List[discord.Attachment], max_count: int, max_size_bytes: int) -> List[str]:
+    errors: List[str] = []
+    if len(attachments) > max_count:
+        errors.append(
+            f"添付数が上限({max_count}件)を超えています: {format_attachment_list(attachments)}"
+        )
+    oversize = [a for a in attachments if a.size > max_size_bytes]
+    if oversize:
+        errors.append(
+            f"サイズ上限({format_file_size(max_size_bytes)})を超えています: {format_attachment_list(oversize)}"
+        )
+    return errors
+
+
+async def build_gemini_file_parts(profile: Profile, attachments: List[discord.Attachment]) -> tuple[List[types.Part], int]:
+    client = get_google_client(profile)
+    parts: List[types.Part] = []
+    estimated_tokens = 0
+    for attachment in attachments:
+        estimated_tokens += estimate_attachment_tokens(attachment)
+        data = await attachment.read()
+        suffix = os.path.splitext(attachment.filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        try:
+            uploaded = await asyncio.to_thread(client.files.upload, file=tmp_path)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        file_uri = getattr(uploaded, "uri", None) or getattr(uploaded, "file_uri", None)
+        mime_type = getattr(uploaded, "mime_type", None) or attachment.content_type or "application/octet-stream"
+        if not file_uri:
+            raise RuntimeError(f"ファイルのアップロードに失敗しました: {attachment.filename}")
+        parts.append(types.Part(file_data=types.FileData(file_uri=file_uri, mime_type=mime_type)))
+    return parts, estimated_tokens
+
+
+def estimate_tokens_from_contents(contents: List[types.Content]) -> int:
+    estimated = 0
+    for content in contents:
+        for part in content.parts:
+            text = getattr(part, "text", None)
+            if text:
+                estimated += estimate_text_tokens(text)
+    return estimated
+
+
+def format_token_count(count: int) -> str:
+    """Format token count with k suffix for values >= 1000."""
+    if count >= 1000:
+        return f"{count / 1000:.1f}k"
+    return str(count)
+
+
+def format_elapsed_time(seconds: float) -> str:
+    """Format elapsed time in human-readable format."""
+    if seconds < 1:
+        return f"{seconds:.2f}s"
+    elif seconds < 60:
+        return f"{seconds:.1f}s"
+    else:
+        minutes = seconds / 60
+        return f"{minutes:.1f}m"
+
+
+def format_jpy_cost(usd_cost: float, rate: float) -> str:
+    """Format cost in JPY with ≈ prefix."""
+    jpy_cost = usd_cost * rate
+    if jpy_cost < 1:
+        return f"(≈ ¥{jpy_cost:.2f})"
+    return f"(≈ ¥{jpy_cost:.0f})"
+
+
+def format_usd_cost(usd_cost: float) -> str:
+    """Format cost in USD or cents."""
+    if usd_cost < 0.10:
+        cents = usd_cost * 100
+        return f"{cents:.2f}¢"
+    return f"${usd_cost:.4f}"
+
+
+@dataclass
+class BuildResult:
+    payload: Union[List[types.Content], List[dict]]
+    estimated_input_tokens: Optional[int] = None
 
 
 def message_to_chat(message: discord.Message) -> Optional[dict]:
@@ -364,6 +506,13 @@ def build_help_message(channel_id: Optional[int] = None) -> str:
         f"- 1分間の最大リクエスト数: {SETTINGS.max_requests_per_minute}",
         f"- 月間コスト上限(USD): {SETTINGS.max_monthly_cost_usd}",
     ])
+    settings_lines.append(
+        f"- 添付上限: {SETTINGS.max_attachments_per_message}件 / {SETTINGS.max_attachment_size_mb}MB/件"
+    )
+    if profile.platform == "google":
+        settings_lines.append("- 添付ファイル入力: 有効（Gemini Files API）")
+    else:
+        settings_lines.append("- 添付ファイル入力: 無効（OpenAIでは添付不可）")
     
     # ペルソナを全文表示
     if SETTINGS.persona:
@@ -500,15 +649,17 @@ def extract_mention_prompt(content: str, bot_id: int) -> Optional[str]:
     return re.sub(pattern, "", content.strip(), count=1).strip()
 
 
-async def build_messages(message: discord.Message, prompt: str, profile: Profile) -> Union[List[types.Content], List[dict]]:
+async def build_messages(message: discord.Message, prompt: str, profile: Profile) -> BuildResult:
     if profile.platform == "google":
-        return await build_messages_google(message, prompt)
-    else:
-        return await build_messages_openai(message, prompt)
+        contents, estimated_input_tokens = await build_messages_google(message, prompt, profile)
+        return BuildResult(payload=contents, estimated_input_tokens=estimated_input_tokens)
+    messages = await build_messages_openai(message, prompt, profile)
+    return BuildResult(payload=messages)
 
 
-async def build_messages_google(message: discord.Message, prompt: str) -> List[types.Content]:
+async def build_messages_google(message: discord.Message, prompt: str, profile: Profile) -> tuple[List[types.Content], int]:
     contents: List[types.Content] = []
+    estimated_input_tokens = 0
     
     # System instruction part
     system_parts = [build_system_prompt()]
@@ -534,6 +685,7 @@ async def build_messages_google(message: discord.Message, prompt: str) -> List[t
     
     # Combine system prompt with context
     combined_system = "\n\n".join(system_parts)
+    estimated_input_tokens += estimate_text_tokens(combined_system)
     contents.append(types.Content(role="user", parts=[types.Part(text=combined_system)]))
     contents.append(types.Content(role="model", parts=[types.Part(text="了解しました。")]))
     
@@ -543,15 +695,23 @@ async def build_messages_google(message: discord.Message, prompt: str) -> List[t
         if content_text:
             role = "model" if m.author == client.user else "user"
             author_prefix = "" if m.author == client.user else f"{m.author.display_name}: "
+            estimated_input_tokens += estimate_text_tokens(f"{author_prefix}{content_text}")
             contents.append(types.Content(role=role, parts=[types.Part(text=f"{author_prefix}{content_text}")]))
     
-    # Add current prompt
-    contents.append(types.Content(role="user", parts=[types.Part(text=f"{message.author.display_name}: {prompt}")]))
+    # Add current prompt with attachments
+    prompt_text = f"{message.author.display_name}: {prompt}"
+    estimated_input_tokens += estimate_text_tokens(prompt_text)
+    parts = [types.Part(text=prompt_text)]
+    if message.attachments:
+        file_parts, attachment_tokens = await build_gemini_file_parts(profile, message.attachments)
+        parts.extend(file_parts)
+        estimated_input_tokens += attachment_tokens
+    contents.append(types.Content(role="user", parts=parts))
     
-    return contents
+    return contents, estimated_input_tokens
 
 
-async def build_messages_openai(message: discord.Message, prompt: str) -> List[dict]:
+async def build_messages_openai(message: discord.Message, prompt: str, profile: Profile) -> List[dict]:
     messages: List[dict] = [{"role": "system", "content": build_system_prompt()}]
 
     reply_chain = await fetch_reply_chain(message, SETTINGS.reply_chain_limit)
@@ -579,16 +739,16 @@ async def build_messages_openai(message: discord.Message, prompt: str) -> List[d
     return messages
 
 
-async def run_llm(messages: Union[List[types.Content], List[dict]], profile: Profile) -> tuple[str, int, int]:
+async def run_llm(messages: BuildResult, profile: Profile) -> tuple[str, int, int, bool]:
     if profile.platform == "google":
-        return await run_llm_google(messages, profile)
-    else:
-        return await run_llm_openai(messages, profile)
+        return await run_llm_google(messages.payload, profile, messages.estimated_input_tokens)
+    return await run_llm_openai(messages.payload, profile)
 
 
-async def run_llm_google(contents: List[types.Content], profile: Profile) -> tuple[str, int, int]:
+async def run_llm_google(contents: List[types.Content], profile: Profile, estimated_input_tokens: Optional[int]) -> tuple[str, int, int, bool]:
     tools = build_tool_spec_google()
     client = get_google_client(profile)
+    used_estimate = False
     
     response = client.models.generate_content(
         model=profile.model,
@@ -604,6 +764,11 @@ async def run_llm_google(contents: List[types.Content], profile: Profile) -> tup
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         input_tokens = response.usage_metadata.prompt_token_count or 0
         output_tokens = response.usage_metadata.candidates_token_count or 0
+    else:
+        used_estimate = True
+        estimated = estimated_input_tokens if estimated_input_tokens is not None else estimate_tokens_from_contents(contents)
+        input_tokens = estimated
+        output_tokens = estimate_text_tokens(response.text or "")
     
     # Extract grounding citations if available
     grounding_citations = ""
@@ -624,6 +789,7 @@ async def run_llm_google(contents: List[types.Content], profile: Profile) -> tup
             # Process function calls
             contents.append(response.candidates[0].content)
             
+            estimated_follow_up_input = 0
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'function_call') and part.function_call:
                     fc = part.function_call
@@ -631,6 +797,8 @@ async def run_llm_google(contents: List[types.Content], profile: Profile) -> tup
                         query = fc.args.get("query", "")
                         max_results = int(fc.args.get("max_results", 5))
                         tool_result = await tavily_search(query, max_results=max_results)
+                        estimated_follow_up_input += estimate_text_tokens(query)
+                        estimated_follow_up_input += estimate_text_tokens(tool_result)
                         
                         # Add function response
                         contents.append(
@@ -656,12 +824,16 @@ async def run_llm_google(contents: List[types.Content], profile: Profile) -> tup
             if hasattr(follow_up, 'usage_metadata') and follow_up.usage_metadata:
                 input_tokens += follow_up.usage_metadata.prompt_token_count or 0
                 output_tokens += follow_up.usage_metadata.candidates_token_count or 0
-            return (follow_up.text or "") + grounding_citations, input_tokens, output_tokens
+            else:
+                used_estimate = True
+                input_tokens += estimated_follow_up_input
+                output_tokens += estimate_text_tokens(follow_up.text or "")
+            return (follow_up.text or "") + grounding_citations, input_tokens, output_tokens, used_estimate
     
-    return (response.text or "") + grounding_citations, input_tokens, output_tokens
+    return (response.text or "") + grounding_citations, input_tokens, output_tokens, used_estimate
 
 
-async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, int, int]:
+async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, int, int, bool]:
     tools = build_tool_spec_openai()
     client = get_openai_client(profile)
     
@@ -715,9 +887,9 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
         if follow_up.usage:
             input_tokens += follow_up.usage.prompt_tokens
             output_tokens += follow_up.usage.completion_tokens
-        return follow_up.choices[0].message.content or "", input_tokens, output_tokens
+        return follow_up.choices[0].message.content or "", input_tokens, output_tokens, False
 
-    return message.content or "", input_tokens, output_tokens
+    return message.content or "", input_tokens, output_tokens, False
 
 
 @client.event
@@ -797,18 +969,45 @@ async def on_message(message: discord.Message) -> None:
 
     profile = get_active_profile(message.channel.id)
 
+    attachments = list(message.attachments or [])
+    if attachments:
+        max_size_bytes = SETTINGS.max_attachment_size_mb * 1024 * 1024
+        errors = validate_attachments(
+            attachments,
+            SETTINGS.max_attachments_per_message,
+            max_size_bytes,
+        )
+        if errors:
+            error_lines = ["添付ファイルの制限により処理できません。"]
+            error_lines.extend(f"- {err}" for err in errors)
+            await message.channel.send("\n".join(error_lines), reference=message)
+            return
+        if profile.platform == "openai":
+            error_lines = [
+                "OpenAIプロファイルでは添付ファイル入力に対応していません。",
+                "添付を削除して再送してください。",
+                f"添付: {format_attachment_list(attachments)}",
+            ]
+            await message.channel.send("\n".join(error_lines), reference=message)
+            return
+
     # Log incoming message
     logger.info(f"📨 Message from {message.author.name} in #{message.channel.name} [{profile.name}]: {prompt[:100]}...")
 
     await message.channel.typing()
+    start_time = datetime.now()
     try:
         msg_data = await build_messages(message, prompt, profile)
-        reply, input_tokens, output_tokens = await run_llm(msg_data, profile)
+        reply, input_tokens, output_tokens, used_estimate = await run_llm(msg_data, profile)
+        elapsed_time = (datetime.now() - start_time).total_seconds()
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
         
         # Log response
-        logger.info(f"✅ Responded to {message.author.name} [{profile.name}] ({input_tokens} in, {output_tokens} out)")
+        estimate_flag = "推定" if used_estimate else "実測"
+        logger.info(
+            f"✅ Responded to {message.author.name} [{profile.name}] ({input_tokens} in, {output_tokens} out, {estimate_flag})"
+        )
         
         chunks = split_discord_message(reply)
         for i, chunk in enumerate(chunks):
@@ -818,9 +1017,16 @@ async def on_message(message: discord.Message) -> None:
                 await message.channel.send(chunk)
         
         # Send token count as an embed
+        cost = calculate_cost(input_tokens, output_tokens, profile)
+        cost_str = format_usd_cost(cost)
+        jpy_str = format_jpy_cost(cost, SETTINGS.usd_to_jpy_rate)
+        input_token_str = format_token_count(input_tokens)
+        output_token_str = format_token_count(output_tokens)
+        elapsed_str = format_elapsed_time(elapsed_time)
+        estimate_suffix = " (推定)" if used_estimate else ""
         embed = discord.Embed(
             color=discord.Color.greyple(),
-            description=f"💎 ${round(calculate_cost(input_tokens, output_tokens, profile), 6)} | {input_tokens} IN / {output_tokens} OUT\n{SETTINGS.embed_footer}"
+            description=f"💸 {cost_str} {jpy_str} | 📥 {input_token_str} • 📤 {output_token_str} • ⏱️ {elapsed_str}{estimate_suffix}\n{SETTINGS.embed_footer}"
         )
         await message.channel.send(embed=embed)
         
