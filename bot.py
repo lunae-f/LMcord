@@ -1,8 +1,10 @@
 import asyncio
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional, Union
 
 import discord
@@ -26,6 +28,13 @@ except ImportError:
     OpenAI = None
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_GOOGLE = "gemini-2.0-flash-exp"
 DEFAULT_MODEL_OPENAI = "gpt-4o"
@@ -124,6 +133,61 @@ intents.message_content = True
 intents.messages = True
 
 client = discord.Client(intents=intents)
+
+TOKENS_FILE = "data/tokens_monthly.json"
+
+
+def ensure_data_dir() -> None:
+    """Ensure data directory exists."""
+    os.makedirs("data", exist_ok=True)
+
+
+def load_monthly_tokens() -> dict:
+    """Load monthly token counts from file."""
+    ensure_data_dir()
+    if not os.path.exists(TOKENS_FILE):
+        return {"month": "", "input": 0, "output": 0}
+    try:
+        with open(TOKENS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"month": "", "input": 0, "output": 0}
+
+
+def save_monthly_tokens(data: dict) -> None:
+    """Save monthly token counts to file."""
+    ensure_data_dir()
+    try:
+        with open(TOKENS_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def update_monthly_tokens(input_tokens: int, output_tokens: int) -> dict:
+    """Update monthly token counts and reset if month changed."""
+    current_month = datetime.now().strftime("%Y-%m")
+    tokens_data = load_monthly_tokens()
+    
+    # Reset if month changed
+    if tokens_data["month"] != current_month:
+        tokens_data = {"month": current_month, "input": 0, "output": 0}
+    
+    tokens_data["input"] += input_tokens
+    tokens_data["output"] += output_tokens
+    save_monthly_tokens(tokens_data)
+    return tokens_data
+
+
+async def update_bot_status(tokens_data: dict) -> None:
+    """Update bot status with monthly token counts."""
+    if not client.user:
+        return
+    activity = discord.Activity(
+        type=discord.ActivityType.playing,
+        name=f"💎 {tokens_data['input']:,} in / {tokens_data['output']:,} out in this month."
+    )
+    await client.change_presence(activity=activity)
 
 
 def build_system_prompt() -> str:
@@ -556,6 +620,9 @@ async def run_llm_openai(messages: List[dict]) -> tuple[str, int, int]:
 @client.event
 async def on_ready() -> None:
     print(f"Logged in as {client.user}")
+    # Set initial status
+    tokens_data = load_monthly_tokens()
+    await update_bot_status(tokens_data)
 
 
 @client.event
@@ -573,12 +640,18 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(build_help_message())
         return
 
+    # Log incoming message
+    logger.info(f"📨 Message from {message.author.name} in #{message.channel.name}: {prompt[:100]}...")
+
     await message.channel.typing()
     try:
         msg_data = await build_messages(message, prompt)
         reply, input_tokens, output_tokens = await run_llm(msg_data)
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
+        
+        # Log response
+        logger.info(f"✅ Responded to {message.author.name} ({input_tokens} in, {output_tokens} out)")
         
         chunks = split_discord_message(reply)
         for i, chunk in enumerate(chunks):
@@ -590,10 +663,16 @@ async def on_message(message: discord.Message) -> None:
         # Send token count as an embed
         embed = discord.Embed(
             color=discord.Color.greyple(),
-            description=f"Tokens: {input_tokens}/{output_tokens}\n{SETTINGS.embed_footer}"
+            description=f"💎 Tokens: {input_tokens}/{output_tokens}\n{SETTINGS.embed_footer}"
         )
         await message.channel.send(embed=embed)
+        
+        # Update monthly token counts and bot status
+        tokens_data = update_monthly_tokens(input_tokens, output_tokens)
+        await update_bot_status(tokens_data)
     except Exception as exc:
+        # Log error
+        logger.error(f"❌ Error processing message from {message.author.name}: {exc}", exc_info=True)
         await message.channel.send(
             f"エラーが発生しました: {exc}", reference=message
         )

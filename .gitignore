@@ -3,6 +3,10 @@
 .env.local
 .env.*.local
 
+# Data files
+data/
+tokens_monthly.json
+
 # Python
 __pycache__/
 *.py[cod]
