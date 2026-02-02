@@ -50,6 +50,7 @@ class Settings:
     search_provider: str
     enable_google_grounding: bool
     persona: Optional[str]
+    enable_citation_links: bool
 
 
 def load_settings() -> Settings:
@@ -68,6 +69,7 @@ def load_settings() -> Settings:
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
     persona = os.getenv("PERSONA")
+    enable_citation_links = env_bool("ENABLE_CITATION_LINKS", False)
     return Settings(
         platform=platform,
         model=model,
@@ -78,6 +80,7 @@ def load_settings() -> Settings:
         search_provider=search_provider,
         enable_google_grounding=enable_google_grounding,
         persona=persona,
+        enable_citation_links=enable_citation_links,
     )
 
 
@@ -210,6 +213,24 @@ def build_help_message() -> str:
     return "\n".join(settings_lines)
 
 
+def split_discord_message(text: str, limit: int = 2000) -> List[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at == -1 or split_at < limit * 0.3:
+            split_at = limit
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 async def tavily_search(query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return "Tavily APIキーが設定されていません。"
@@ -231,11 +252,12 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     lines = []
     if answer:
         lines.append(f"要約: {answer}")
-    lines.append("参照URL:")
-    for item in results:
-        title = item.get("title") or "(no title)"
-        url = item.get("url") or ""
-        lines.append(f"- {title}: {url}")
+    if results:
+        lines.append("参照:")
+        for item in results:
+            title = item.get("title") or "(no title)"
+            url = item.get("url") or ""
+            lines.append(f"[{title}]({url})")
     return "\n".join(lines)
 
 
@@ -414,9 +436,9 @@ async def run_llm_google(contents: List[types.Content]) -> str:
             citations = []
             for chunk in metadata.grounding_chunks:
                 if hasattr(chunk, "web") and chunk.web:
-                    citations.append(f"- {chunk.web.title}: {chunk.web.uri}")
+                    citations.append(f"[{chunk.web.title}]({chunk.web.uri})")
             if citations:
-                grounding_citations = "\n\n**参照URL:**\n" + "\n".join(citations)
+                grounding_citations = "\n\n参照: " + " | ".join(citations)
     
     # Check if there are function calls (for Tavily search fallback)
     if response.candidates and response.candidates[0].content.parts:
@@ -534,7 +556,12 @@ async def on_message(message: discord.Message) -> None:
         reply = await run_llm(msg_data)
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
-        await message.channel.send(reply, reference=message)
+        chunks = split_discord_message(reply)
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                await message.channel.send(chunk, reference=message)
+            else:
+                await message.channel.send(chunk)
     except Exception as exc:
         await message.channel.send(
             f"エラーが発生しました: {exc}", reference=message
