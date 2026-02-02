@@ -79,8 +79,8 @@ TAVILY_API_KEY=your_tavily_api_key
 - `ENABLE_GOOGLE_GROUNDING` - Google Searchでの情報取得を有効にするか（google使用時）
 - `PERSONA` - ボットのペルソナ・キャラクター設定（オプション）
 - `TAVILY_API_KEY` - Tavily Web検索APIキー（フォールバック検索用）
-- `CHANNEL_HISTORY_LIMIT` - 参照するチャンネル履歴件数（既定: 50）
-- `REPLY_CHAIN_LIMIT` - 参照する返信チェーンの深さ（既定: 50）
+- `CHANNEL_HISTORY_LIMIT` - 参照するチャンネル履歴件数（既定: 15）
+- `REPLY_CHAIN_LIMIT` - 参照する返信チェーンの深さ（既定: 15）
 
 ## ペルソナ（キャラクター）設定
 環境変数 `PERSONA` でボットのキャラクターや役割を設定できます。

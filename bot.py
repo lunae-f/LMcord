@@ -63,8 +63,8 @@ def load_settings() -> Settings:
     
     model = os.getenv("MODEL", default_model)
     base_url = os.getenv("OPENAI_BASE_URL") if platform == "openai" else None
-    channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "50"))
-    reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "50"))
+    channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "15"))
+    reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "15"))
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
