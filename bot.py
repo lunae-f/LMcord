@@ -194,6 +194,7 @@ def build_help_message() -> str:
         f"- 返信参照チェーン: {SETTINGS.reply_chain_limit}件",
         f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
         f"- 検索プロバイダ: {SETTINGS.search_provider}",
+        f"- 出典リンク表示: {'有効' if SETTINGS.enable_citation_links else '無効'}",
     ])
     
     # ペルソナを全文表示
@@ -252,7 +253,7 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     lines = []
     if answer:
         lines.append(f"要約: {answer}")
-    if results:
+    if results and SETTINGS.enable_citation_links:
         lines.append("参照:")
         for item in results:
             title = item.get("title") or "(no title)"
@@ -430,7 +431,7 @@ async def run_llm_google(contents: List[types.Content]) -> str:
     
     # Extract grounding citations if available
     grounding_citations = ""
-    if response.candidates and response.candidates[0].grounding_metadata:
+    if SETTINGS.enable_citation_links and response.candidates and response.candidates[0].grounding_metadata:
         metadata = response.candidates[0].grounding_metadata
         if hasattr(metadata, "grounding_chunks") and metadata.grounding_chunks:
             citations = []
