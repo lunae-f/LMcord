@@ -5,10 +5,12 @@ import math
 import os
 import re
 import tempfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Union
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -151,6 +153,8 @@ def load_profiles() -> None:
             raise RuntimeError("Each profile must include name, platform, model")
         if platform not in {"google", "openai"}:
             raise RuntimeError(f"Unsupported platform in profile '{name}': {platform}")
+        if not api_key:
+            logger.warning(f"⚠️ プロファイル '{name}' のAPIキーが設定されていません。このプロファイルは利用できません。")
         loaded[name] = Profile(
             name=name,
             platform=platform,
@@ -234,8 +238,11 @@ client = bot  # For backward compatibility
 
 TOKENS_FILE = "data/tokens_monthly.json"
 
-# Rate limiting
-REQUEST_TIMES: List[datetime] = []
+# Rate limiting (per user)
+REQUEST_TIMES: dict[int, deque[datetime]] = {}
+
+# Token update lock
+TOKENS_LOCK = asyncio.Lock()
 
 
 def ensure_data_dir() -> None:
@@ -272,17 +279,22 @@ def calculate_cost(input_tokens: int, output_tokens: int, profile: Profile) -> f
     return round(input_cost + output_cost, 6)
 
 
-def check_rate_limit() -> Optional[str]:
-    """Check if rate limit is exceeded. Returns error message if exceeded, None otherwise."""
-    global REQUEST_TIMES
+def check_rate_limit(user_id: int) -> Optional[str]:
+    """Check if user has exceeded rate limit. Returns error message if exceeded, None otherwise."""
     now = datetime.now()
     cutoff = now.timestamp() - 60
-    REQUEST_TIMES = [t for t in REQUEST_TIMES if t.timestamp() > cutoff]
     
-    if len(REQUEST_TIMES) >= SETTINGS.max_requests_per_minute:
-        return f"⚠️ レート制限: 1分間に{SETTINGS.max_requests_per_minute}リクエストまでです。少し待ってから再試行してください。"
+    if user_id not in REQUEST_TIMES:
+        REQUEST_TIMES[user_id] = deque()
     
-    REQUEST_TIMES.append(now)
+    user_times = REQUEST_TIMES[user_id]
+    while user_times and user_times[0].timestamp() < cutoff:
+        user_times.popleft()
+    
+    if len(user_times) >= SETTINGS.max_requests_per_minute:
+        return f"⚠️ レート制限: あなたは1分間に{SETTINGS.max_requests_per_minute}リクエストまでです。少し待ってから再試行してください。"
+    
+    user_times.append(now)
     return None
 
 
@@ -307,7 +319,7 @@ def get_cost_warning(tokens_data: dict) -> Optional[str]:
 
 
 def update_monthly_tokens(input_tokens: int, output_tokens: int, profile: Profile) -> dict:
-    """Update monthly token counts and reset if month changed."""
+    """Update monthly token counts and reset if month changed. Must be called within TOKENS_LOCK."""
     current_month = datetime.now().strftime("%Y-%m")
     tokens_data = load_monthly_tokens()
     
@@ -609,19 +621,26 @@ def split_discord_message(text: str, limit: int = 2000) -> List[str]:
 async def tavily_search(query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return "Tavily APIキーが設定されていません。"
-    response = requests.post(
-        "https://api.tavily.com/search",
-        json={
-            "api_key": TAVILY_API_KEY,
-            "query": query,
-            "max_results": max_results,
-            "include_answer": True,
-            "include_raw_content": False,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": max_results,
+                    "include_answer": True,
+                    "include_raw_content": False,
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+    except Exception as e:
+        logger.error(f"Tavily検索エラー: {e}")
+        return f"検索に失敗しました: {e}"
+    
     answer = data.get("answer") or ""
     results = data.get("results") or []
     lines = []
@@ -807,7 +826,8 @@ async def run_llm_google(contents: List[types.Content], profile: Profile, estima
     client = get_google_client(profile)
     used_estimate = False
     
-    response = client.models.generate_content(
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model=profile.model,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -873,7 +893,8 @@ async def run_llm_google(contents: List[types.Content], profile: Profile, estima
                         )
             
             # Get follow-up response
-            follow_up = client.models.generate_content(
+            follow_up = await asyncio.to_thread(
+                client.models.generate_content,
                 model=profile.model,
                 contents=contents,
             )
@@ -894,7 +915,8 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
     tools = build_tool_spec_openai()
     client = get_openai_client(profile)
     
-    response = client.chat.completions.create(
+    response = await asyncio.to_thread(
+        client.chat.completions.create,
         model=profile.model,
         messages=messages,
         tools=tools,
@@ -936,7 +958,8 @@ async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, i
                         "content": tool_result,
                     }
                 )
-        follow_up = client.chat.completions.create(
+        follow_up = await asyncio.to_thread(
+            client.chat.completions.create,
             model=profile.model,
             messages=messages,
         )
@@ -1062,8 +1085,8 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(build_help_message(message.channel.id))
         return
 
-    # Check rate limit
-    rate_limit_error = check_rate_limit()
+    # Check rate limit (per user)
+    rate_limit_error = check_rate_limit(message.author.id)
     if rate_limit_error:
         await message.channel.send(rate_limit_error, reference=message)
         return
@@ -1131,8 +1154,9 @@ async def on_message(message: discord.Message) -> None:
         )
         await message.channel.send(embed=embed)
         
-        # Update monthly token counts and bot status
-        tokens_data = update_monthly_tokens(input_tokens, output_tokens, profile)
+        # Update monthly token counts and bot status (with lock)
+        async with TOKENS_LOCK:
+            tokens_data = update_monthly_tokens(input_tokens, output_tokens, profile)
         await update_bot_status(tokens_data)
         
         # Check and send cost warning
