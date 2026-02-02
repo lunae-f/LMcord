@@ -1,7 +1,7 @@
 services:
   discord-bot:
     build: .
-    container_name: llm-discord-bot
+    container_name: lmcord-bot
     restart: unless-stopped
     env_file:
       - .env
