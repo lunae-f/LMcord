@@ -121,13 +121,15 @@ client = discord.Client(intents=intents)
 
 
 def build_system_prompt() -> str:
+    # If persona is set, use only the persona
+    if SETTINGS.persona:
+        return SETTINGS.persona
+    
+    # Otherwise, use default assistant prompt
     base_prompt = "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。"
     if SETTINGS.enable_web_search or SETTINGS.enable_google_grounding:
         base_prompt += "\n必要に応じてウェブ検索ツールを使用し、最新の情報を取得してください。"
     base_prompt += "\n推測を避け、わからない場合はわかりないと伝えてください。"
-    
-    if SETTINGS.persona:
-        base_prompt += f"\n\n【ペルソナ設定】\n{SETTINGS.persona}"
     
     return base_prompt
 
@@ -178,16 +180,27 @@ def build_help_message() -> str:
     ]
     if SETTINGS.base_url:
         settings_lines.append(f"- エンドポイント: {SETTINGS.base_url}")
+    
+    # Google Grounding表示（google使用時のみ）
+    if SETTINGS.platform == "google":
+        grounding_status = "有効" if SETTINGS.enable_google_grounding else "無効"
+        settings_lines.append(f"- Google Grounding with Google Search: {grounding_status}")
+    
     settings_lines.extend([
         f"- チャンネル履歴参照: {SETTINGS.channel_history_limit}件",
         f"- 返信参照チェーン: {SETTINGS.reply_chain_limit}件",
         f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
         f"- 検索プロバイダ: {SETTINGS.search_provider}",
-        "- スタイル: 日本語/丁寧/正確さ重視",
     ])
+    
+    # ペルソナを全文表示
     if SETTINGS.persona:
-        persona_display = SETTINGS.persona[:50] + "..." if len(SETTINGS.persona) > 50 else SETTINGS.persona
-        settings_lines.append(f"- ペルソナ: {persona_display}")
+        settings_lines.extend([
+            "",
+            "【ペルソナ設定】",
+            SETTINGS.persona,
+        ])
+    
     settings_lines.extend([
         "",
         "使い方:",
