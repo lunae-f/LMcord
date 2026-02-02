@@ -52,9 +52,6 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 @dataclass
 class Settings:
-    platform: str
-    model: str
-    base_url: Optional[str]
     channel_history_limit: int
     reply_chain_limit: int
     enable_web_search: bool
@@ -63,18 +60,11 @@ class Settings:
     persona: Optional[str]
     enable_citation_links: bool
     embed_footer: str
+    max_monthly_cost_usd: float
+    max_requests_per_minute: int
 
 
 def load_settings() -> Settings:
-    platform = os.getenv("PLATFORM", "google").lower()
-    
-    if platform == "google":
-        default_model = DEFAULT_MODEL_GOOGLE
-    else:
-        default_model = DEFAULT_MODEL_OPENAI
-    
-    model = os.getenv("MODEL", default_model)
-    base_url = os.getenv("OPENAI_BASE_URL") if platform == "openai" else None
     channel_history_limit = int(os.getenv("CHANNEL_HISTORY_LIMIT", "15"))
     reply_chain_limit = int(os.getenv("REPLY_CHAIN_LIMIT", "15"))
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
@@ -83,10 +73,9 @@ def load_settings() -> Settings:
     persona = os.getenv("PERSONA")
     enable_citation_links = env_bool("ENABLE_CITATION_LINKS", False)
     embed_footer = os.getenv("EMBED_FOOTER", "[LMcord](https://github.com/lunae-f/LMcord), made with ❤️‍🔥 by Lunae. | MIT License")
+    max_monthly_cost_usd = float(os.getenv("MAX_MONTHLY_COST_USD", "0"))
+    max_requests_per_minute = int(os.getenv("MAX_REQUESTS_PER_MINUTE", "10"))
     return Settings(
-        platform=platform,
-        model=model,
-        base_url=base_url,
         channel_history_limit=channel_history_limit,
         reply_chain_limit=reply_chain_limit,
         enable_web_search=enable_web_search,
@@ -95,10 +84,96 @@ def load_settings() -> Settings:
         persona=persona,
         enable_citation_links=enable_citation_links,
         embed_footer=embed_footer,
+        max_monthly_cost_usd=max_monthly_cost_usd,
+        max_requests_per_minute=max_requests_per_minute,
     )
 
 
 SETTINGS = load_settings()
+
+@dataclass
+class Profile:
+    name: str
+    platform: str
+    model: str
+    api_key: str
+    base_url: Optional[str]
+    input_cost_per_1m: float
+    output_cost_per_1m: float
+
+
+PROFILES_FILE = "profiles.json"
+PROFILES: dict[str, Profile] = {}
+ACTIVE_PROFILE_NAME: Optional[str] = None
+CHANNEL_PROFILE_OVERRIDES: dict[int, str] = {}
+
+
+def resolve_env_value(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    match = re.fullmatch(r"\$\{([A-Z0-9_]+)\}", value)
+    if match:
+        return os.getenv(match.group(1), "")
+    return value
+
+
+def load_profiles() -> None:
+    global PROFILES, ACTIVE_PROFILE_NAME
+    if not os.path.exists(PROFILES_FILE):
+        raise RuntimeError(f"{PROFILES_FILE} is required")
+    with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    profiles = data.get("profiles", [])
+    active_name = data.get("active_profile")
+    if not profiles:
+        raise RuntimeError("profiles.json must contain at least one profile")
+    loaded: dict[str, Profile] = {}
+    for p in profiles:
+        name = p.get("name")
+        platform = p.get("platform")
+        model = p.get("model")
+        api_key = resolve_env_value(p.get("api_key"))
+        base_url = resolve_env_value(p.get("base_url")) or None
+        input_cost = float(p.get("input_cost_per_1m", 0))
+        output_cost = float(p.get("output_cost_per_1m", 0))
+        if not name or not platform or not model:
+            raise RuntimeError("Each profile must include name, platform, model")
+        if platform not in {"google", "openai"}:
+            raise RuntimeError(f"Unsupported platform in profile '{name}': {platform}")
+        loaded[name] = Profile(
+            name=name,
+            platform=platform,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            input_cost_per_1m=input_cost,
+            output_cost_per_1m=output_cost,
+        )
+    PROFILES = loaded
+    ACTIVE_PROFILE_NAME = active_name or next(iter(loaded.keys()))
+    if ACTIVE_PROFILE_NAME not in PROFILES:
+        raise RuntimeError(f"active_profile '{ACTIVE_PROFILE_NAME}' not found in profiles.json")
+
+
+def get_active_profile(channel_id: Optional[int] = None) -> Profile:
+    if channel_id is not None:
+        override = CHANNEL_PROFILE_OVERRIDES.get(channel_id)
+        if override and override in PROFILES:
+            return PROFILES[override]
+    if not ACTIVE_PROFILE_NAME or ACTIVE_PROFILE_NAME not in PROFILES:
+        raise RuntimeError("No active profile loaded")
+    return PROFILES[ACTIVE_PROFILE_NAME]
+
+
+def set_channel_profile(channel_id: int, profile_name: str) -> None:
+    if profile_name not in PROFILES:
+        raise RuntimeError(f"Unknown profile: {profile_name}")
+    CHANNEL_PROFILE_OVERRIDES[channel_id] = profile_name
+
+
+def list_profiles() -> List[str]:
+    return list(PROFILES.keys())
+
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -108,27 +183,36 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is required")
 
-# Initialize API clients based on platform
-genai_client = None
-openai_client = None
+load_profiles()
 
-if SETTINGS.platform == "google":
+GOOGLE_CLIENTS: dict[str, genai.Client] = {}
+OPENAI_CLIENTS: dict[tuple[str, str], OpenAI] = {}
+
+
+def get_google_client(profile: Profile) -> genai.Client:
     if not GOOGLE_AVAILABLE:
         raise RuntimeError("google-genai package is not installed. Install with: pip install google-genai")
-    if not GOOGLE_API_KEY:
-        raise RuntimeError("GOOGLE_API_KEY is required for Google platform")
-    genai_client = genai.Client(api_key=GOOGLE_API_KEY)
-elif SETTINGS.platform == "openai":
+    if not profile.api_key:
+        raise RuntimeError(f"API key missing for profile '{profile.name}'")
+    if profile.api_key in GOOGLE_CLIENTS:
+        return GOOGLE_CLIENTS[profile.api_key]
+    client = genai.Client(api_key=profile.api_key)
+    GOOGLE_CLIENTS[profile.api_key] = client
+    return client
+
+
+def get_openai_client(profile: Profile) -> OpenAI:
     if not OPENAI_AVAILABLE:
         raise RuntimeError("openai package is not installed. Install with: pip install openai")
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is required for OpenAI platform")
-    openai_client = OpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url=SETTINGS.base_url or DEFAULT_BASE_URL
-    )
-else:
-    raise RuntimeError(f"Unsupported platform: {SETTINGS.platform}. Use 'google' or 'openai'")
+    if not profile.api_key:
+        raise RuntimeError(f"API key missing for profile '{profile.name}'")
+    base_url = profile.base_url or DEFAULT_BASE_URL
+    cache_key = (profile.api_key, base_url)
+    if cache_key in OPENAI_CLIENTS:
+        return OPENAI_CLIENTS[cache_key]
+    client = OpenAI(api_key=profile.api_key, base_url=base_url)
+    OPENAI_CLIENTS[cache_key] = client
+    return client
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -149,12 +233,12 @@ def load_monthly_tokens() -> dict:
     """Load monthly token counts from file."""
     ensure_data_dir()
     if not os.path.exists(TOKENS_FILE):
-        return {"month": "", "input": 0, "output": 0}
+        return {"month": "", "input": 0, "output": 0, "cost": 0.0, "requests": 0}
     try:
         with open(TOKENS_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"month": "", "input": 0, "output": 0}
+        return {"month": "", "input": 0, "output": 0, "cost": 0.0, "requests": 0}
 
 
 def save_monthly_tokens(data: dict) -> None:
@@ -167,28 +251,38 @@ def save_monthly_tokens(data: dict) -> None:
         pass
 
 
-def update_monthly_tokens(input_tokens: int, output_tokens: int) -> dict:
+def calculate_cost(input_tokens: int, output_tokens: int, profile: Profile) -> float:
+    """Calculate cost based on tokens and profile pricing."""
+    input_cost = (input_tokens / 1_000_000) * profile.input_cost_per_1m
+    output_cost = (output_tokens / 1_000_000) * profile.output_cost_per_1m
+    return round(input_cost + output_cost, 6)
+
+
+def update_monthly_tokens(input_tokens: int, output_tokens: int, profile: Profile) -> dict:
     """Update monthly token counts and reset if month changed."""
     current_month = datetime.now().strftime("%Y-%m")
     tokens_data = load_monthly_tokens()
     
     # Reset if month changed
     if tokens_data["month"] != current_month:
-        tokens_data = {"month": current_month, "input": 0, "output": 0}
+        tokens_data = {"month": current_month, "input": 0, "output": 0, "cost": 0.0, "requests": 0}
     
     tokens_data["input"] += input_tokens
     tokens_data["output"] += output_tokens
+    tokens_data["cost"] = round(tokens_data.get("cost", 0.0) + calculate_cost(input_tokens, output_tokens, profile), 6)
+    tokens_data["requests"] = tokens_data.get("requests", 0) + 1
     save_monthly_tokens(tokens_data)
     return tokens_data
 
 
 async def update_bot_status(tokens_data: dict) -> None:
-    """Update bot status with monthly token counts."""
+    """Update bot status with monthly token counts and cost."""
     if not client.user:
         return
+    cost = tokens_data.get("cost", 0.0)
     activity = discord.Activity(
         type=discord.ActivityType.playing,
-        name=f"💎 {tokens_data['input']:,} IN / {tokens_data['output']:,} OUT in this month."
+        name=f"💎 ${cost:.4f} | {tokens_data['input']} IN / {tokens_data['output']} OUT"
     )
     await client.change_presence(activity=activity)
 
@@ -245,17 +339,19 @@ async def fetch_reply_chain(message: discord.Message, limit: int) -> List[discor
     return list(reversed(chain))
 
 
-def build_help_message() -> str:
+def build_help_message(channel_id: Optional[int] = None) -> str:
+    profile = get_active_profile(channel_id)
     settings_lines = [
         "現在の設定:",
-        f"- プラットフォーム: {SETTINGS.platform}",
-        f"- モデル: {SETTINGS.model}",
+        f"- プロファイル: {profile.name}",
+        f"- プラットフォーム: {profile.platform}",
+        f"- モデル: {profile.model}",
     ]
-    if SETTINGS.base_url:
-        settings_lines.append(f"- エンドポイント: {SETTINGS.base_url}")
+    if profile.base_url:
+        settings_lines.append(f"- エンドポイント: {profile.base_url}")
     
     # Google Grounding表示（google使用時のみ）
-    if SETTINGS.platform == "google":
+    if profile.platform == "google":
         grounding_status = "有効" if SETTINGS.enable_google_grounding else "無効"
         settings_lines.append(f"- Google Grounding with Google Search: {grounding_status}")
     
@@ -265,6 +361,8 @@ def build_help_message() -> str:
         f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
         f"- 検索プロバイダ: {SETTINGS.search_provider}",
         f"- 出典リンク表示: {'有効' if SETTINGS.enable_citation_links else '無効'}",
+        f"- 1分間の最大リクエスト数: {SETTINGS.max_requests_per_minute}",
+        f"- 月間コスト上限(USD): {SETTINGS.max_monthly_cost_usd}",
     ])
     
     # ペルソナを全文表示
@@ -402,8 +500,8 @@ def extract_mention_prompt(content: str, bot_id: int) -> Optional[str]:
     return re.sub(pattern, "", content.strip(), count=1).strip()
 
 
-async def build_messages(message: discord.Message, prompt: str) -> Union[List[types.Content], List[dict]]:
-    if SETTINGS.platform == "google":
+async def build_messages(message: discord.Message, prompt: str, profile: Profile) -> Union[List[types.Content], List[dict]]:
+    if profile.platform == "google":
         return await build_messages_google(message, prompt)
     else:
         return await build_messages_openai(message, prompt)
@@ -481,18 +579,19 @@ async def build_messages_openai(message: discord.Message, prompt: str) -> List[d
     return messages
 
 
-async def run_llm(messages: Union[List[types.Content], List[dict]]) -> tuple[str, int, int]:
-    if SETTINGS.platform == "google":
-        return await run_llm_google(messages)
+async def run_llm(messages: Union[List[types.Content], List[dict]], profile: Profile) -> tuple[str, int, int]:
+    if profile.platform == "google":
+        return await run_llm_google(messages, profile)
     else:
-        return await run_llm_openai(messages)
+        return await run_llm_openai(messages, profile)
 
 
-async def run_llm_google(contents: List[types.Content]) -> tuple[str, int, int]:
+async def run_llm_google(contents: List[types.Content], profile: Profile) -> tuple[str, int, int]:
     tools = build_tool_spec_google()
+    client = get_google_client(profile)
     
-    response = genai_client.models.generate_content(
-        model=SETTINGS.model,
+    response = client.models.generate_content(
+        model=profile.model,
         contents=contents,
         config=types.GenerateContentConfig(
             tools=tools if tools else None,
@@ -549,8 +648,8 @@ async def run_llm_google(contents: List[types.Content]) -> tuple[str, int, int]:
                         )
             
             # Get follow-up response
-            follow_up = genai_client.models.generate_content(
-                model=SETTINGS.model,
+            follow_up = client.models.generate_content(
+                model=profile.model,
                 contents=contents,
             )
             # Update token counts for follow-up
@@ -562,11 +661,12 @@ async def run_llm_google(contents: List[types.Content]) -> tuple[str, int, int]:
     return (response.text or "") + grounding_citations, input_tokens, output_tokens
 
 
-async def run_llm_openai(messages: List[dict]) -> tuple[str, int, int]:
+async def run_llm_openai(messages: List[dict], profile: Profile) -> tuple[str, int, int]:
     tools = build_tool_spec_openai()
+    client = get_openai_client(profile)
     
-    response = openai_client.chat.completions.create(
-        model=SETTINGS.model,
+    response = client.chat.completions.create(
+        model=profile.model,
         messages=messages,
         tools=tools,
         tool_choice="auto" if tools else None,
@@ -607,8 +707,8 @@ async def run_llm_openai(messages: List[dict]) -> tuple[str, int, int]:
                         "content": tool_result,
                     }
                 )
-        follow_up = openai_client.chat.completions.create(
-            model=SETTINGS.model,
+        follow_up = client.chat.completions.create(
+            model=profile.model,
             messages=messages,
         )
         # Accumulate token counts from follow-up
@@ -635,16 +735,49 @@ async def on_ready() -> None:
         logger.error(f"Failed to sync commands: {e}")
 
 
-@bot.tree.command(name="llmcord", description="LMcordの設定とヘルプを表示")
-@app_commands.describe(action="実行するアクション")
-@app_commands.choices(action=[
-    app_commands.Choice(name="help", value="help")
+lmcord_group = app_commands.Group(name="lmcord", description="LMcordの操作コマンド")
+
+
+@lmcord_group.command(name="help", description="現在の設定とヘルプを表示")
+async def llmcord_help(interaction: discord.Interaction):
+    help_text = build_help_message(interaction.channel_id)
+    await interaction.response.send_message(help_text, ephemeral=True)
+
+
+@lmcord_group.command(name="profiles", description="利用可能なプロファイル一覧を表示")
+async def llmcord_profiles(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    active_default = ACTIVE_PROFILE_NAME or "(none)"
+    active_channel = CHANNEL_PROFILE_OVERRIDES.get(channel_id) if channel_id else None
+    lines = ["利用可能なプロファイル:"]
+    for name in list_profiles():
+        marks = []
+        if name == active_default:
+            marks.append("default")
+        if active_channel and name == active_channel:
+            marks.append("channel")
+        suffix = f" ({', '.join(marks)})" if marks else ""
+        lines.append(f"- {name}{suffix}")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@lmcord_group.command(name="switch", description="このチャンネルのプロファイルを切り替え")
+@app_commands.describe(profile="切り替え先プロファイル")
+@app_commands.choices(profile=[
+    app_commands.Choice(name=name, value=name) for name in list_profiles()
 ])
-async def llmcord_command(interaction: discord.Interaction, action: str):
-    """LMcord slash command handler."""
-    if action == "help":
-        help_text = build_help_message()
-        await interaction.response.send_message(help_text, ephemeral=True)
+async def llmcord_switch(interaction: discord.Interaction, profile: str):
+    if not interaction.channel_id:
+        await interaction.response.send_message("チャンネル情報が取得できませんでした。", ephemeral=True)
+        return
+    try:
+        set_channel_profile(interaction.channel_id, profile)
+        await interaction.response.send_message(f"このチャンネルのプロファイルを '{profile}' に切り替えました。")
+    except Exception as exc:
+        await interaction.response.send_message(f"切り替えに失敗しました: {exc}", ephemeral=True)
+
+
+bot.tree.add_command(lmcord_group)
 
 
 @client.event
@@ -659,21 +792,23 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if not prompt:
-        await message.channel.send(build_help_message())
+        await message.channel.send(build_help_message(message.channel.id))
         return
 
+    profile = get_active_profile(message.channel.id)
+
     # Log incoming message
-    logger.info(f"📨 Message from {message.author.name} in #{message.channel.name}: {prompt[:100]}...")
+    logger.info(f"📨 Message from {message.author.name} in #{message.channel.name} [{profile.name}]: {prompt[:100]}...")
 
     await message.channel.typing()
     try:
-        msg_data = await build_messages(message, prompt)
-        reply, input_tokens, output_tokens = await run_llm(msg_data)
+        msg_data = await build_messages(message, prompt, profile)
+        reply, input_tokens, output_tokens = await run_llm(msg_data, profile)
         if not reply:
             reply = "申し訳ありません、応答の生成に失敗しました。"
         
         # Log response
-        logger.info(f"✅ Responded to {message.author.name} ({input_tokens} in, {output_tokens} out)")
+        logger.info(f"✅ Responded to {message.author.name} [{profile.name}] ({input_tokens} in, {output_tokens} out)")
         
         chunks = split_discord_message(reply)
         for i, chunk in enumerate(chunks):
@@ -685,12 +820,12 @@ async def on_message(message: discord.Message) -> None:
         # Send token count as an embed
         embed = discord.Embed(
             color=discord.Color.greyple(),
-            description=f"💎 Tokens: {input_tokens}/{output_tokens}\n{SETTINGS.embed_footer}"
+            description=f"💎 ${round(calculate_cost(input_tokens, output_tokens, profile), 6)} | {input_tokens} IN / {output_tokens} OUT\n{SETTINGS.embed_footer}"
         )
         await message.channel.send(embed=embed)
         
         # Update monthly token counts and bot status
-        tokens_data = update_monthly_tokens(input_tokens, output_tokens)
+        tokens_data = update_monthly_tokens(input_tokens, output_tokens, profile)
         await update_bot_status(tokens_data)
     except Exception as exc:
         # Log error

@@ -1,0 +1,39 @@
+{
+  "active_profile": "Gemini3FlashPreview",
+  "profiles": [
+    {
+      "name": "Gemini3FlashPreview",
+      "platform": "google",
+      "model": "gemini-3-flash-preview",
+      "api_key": "${GOOGLE_API_KEY}",
+      "input_cost_per_1m": 0.50,
+      "output_cost_per_1m": 3.00
+    },
+    {
+        "name": "Gemini2.5FlashLite",
+        "platform": "google",
+        "model": "gemini-2.5-flash-lite",
+        "api_key": "${GOOGLE_API_KEY}",
+        "input_cost_per_1m": 0.10,
+        "output_cost_per_1m": 0.40
+    },
+    {
+        "name": "DeepSeekR1T2Chimera",
+        "platform": "openai",
+        "model": "tngtech/deepseek-r1t2-chimera:free",
+        "api_key": "${OPENAI_API_KEY}",
+        "base_url": "${OPENAI_BASE_URL}",
+        "input_cost_per_1m": 0.00,
+        "output_cost_per_1m": 0.00
+    },
+    {
+      "name": "TrinityLargePreview",
+      "platform": "openai",
+      "model": "arcee-ai/trinity-large-preview:free",
+      "api_key": "${OPENAI_API_KEY}",
+      "base_url": "${OPENAI_BASE_URL}",
+      "input_cost_per_1m": 0.00,
+      "output_cost_per_1m": 0.00
+    }
+  ]
+}
