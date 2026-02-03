@@ -729,47 +729,60 @@ def build_help_message(channel_id: Optional[int] = None) -> str:
     profile = get_active_profile(channel_id)
     settings_lines = [
         "現在の設定:",
-        f"- プロファイル: {profile.name}",
-        f"- プラットフォーム: {profile.platform}",
-        f"- モデル: {profile.model}",
+        f"• プロファイル: {profile.name}",
+        f"    • プラットフォーム: {profile.platform}",
+        f"    • モデル: {profile.model}",
     ]
     if profile.base_url:
-        settings_lines.append(f"- エンドポイント: {profile.base_url}")
+        settings_lines.append(f"    • エンドポイント: {profile.base_url}")
     
     # Google Grounding表示（google使用時のみ）
     if profile.platform == "google":
         grounding_status = "有効" if SETTINGS.enable_google_grounding else "無効"
-        settings_lines.append(f"- Google Grounding with Google Search: {grounding_status}")
+        settings_lines.append(f"• Google Grounding with Google Search: {grounding_status}")
     
     settings_lines.extend([
-        f"- チャンネル履歴参照: {SETTINGS.channel_history_limit}件",
-        f"- 返信参照チェーン: {SETTINGS.reply_chain_limit}件",
-        f"- Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
-        f"- 検索プロバイダ: {SETTINGS.search_provider}",
-        f"- 出典リンク表示: {'有効' if SETTINGS.enable_citation_links else '無効'}",
-        f"- 1分間の最大リクエスト数: {SETTINGS.max_requests_per_minute}",
-        f"- 月間コスト上限(USD): {SETTINGS.max_monthly_cost_usd}",
+        f"• チャンネル履歴参照: {SETTINGS.channel_history_limit}件",
+        f"• 返信参照チェーン: {SETTINGS.reply_chain_limit}件",
+        f"• Web検索: {'有効' if SETTINGS.enable_web_search and TAVILY_API_KEY else '無効'}",
+        f"• 検索プロバイダ: {SETTINGS.search_provider}",
+        f"• 出典リンク表示: {'有効' if SETTINGS.enable_citation_links else '無効'}",
+        f"• 1分間の最大リクエスト数: {SETTINGS.max_requests_per_minute}",
+        f"• 月間コスト上限(USD): {SETTINGS.max_monthly_cost_usd}",
     ])
     settings_lines.append(
-        f"- 添付上限: {SETTINGS.max_attachments_per_message}件 / {SETTINGS.max_attachment_size_mb}MB/件"
+        f"• 添付上限: {SETTINGS.max_attachments_per_message}件 / {SETTINGS.max_attachment_size_mb}MB/件"
     )
     if profile.platform == "google":
-        settings_lines.append("- 添付ファイル入力: 有効（Gemini Files API）")
+        settings_lines.append("• 添付ファイル入力: 有効（Gemini Files API）")
     else:
-        settings_lines.append("- 添付ファイル入力: 無効（OpenAIでは添付不可）")
+        settings_lines.append("• 添付ファイル入力: 無効（OpenAIでは添付不可）")
     
     # ペルソナ表示
     active_persona_name = get_active_persona(channel_id)
+    persona_text = PERSONAS.get(active_persona_name, "（テキストなし）")
     settings_lines.extend([
         "",
-        f"【ペルソナ】{active_persona_name}",
+        f"ペルソナ: {active_persona_name}",
+        f"```",
+        f"{persona_text}",
+        f"```"
     ])
     
     settings_lines.extend([
         "",
+        "📋 利用可能なコマンド:",
+        "• `/lmcord help` - この設定とヘルプを表示",
+        "• `/lmcord stats` - 月次統計情報を表示",
+        "• `/lmcord profile list` - プロファイル一覧を表示",
+        "• `/lmcord profile switch` - プロファイルを切り替え",
+        "• `/lmcord profile reset` - プロファイルをリセット",
+        "• `/lmcord persona list` - ペルソナ一覧を表示",
+        "• `/lmcord persona switch` - ペルソナを切り替え",
+        "• `/lmcord persona reset` - ペルソナをリセット",
+        "",
         "使い方:",
-        "- @ボット名 質問内容 の形式で呼び出してください。",
-        "- 必要に応じてボットがウェブ検索を使います（検索した場合は参照URLを表示）。",
+        "- @ボット名 プロンプト の形式で呼び出してください。",
     ])
     return "\n".join(settings_lines)
 
@@ -1178,15 +1191,12 @@ async def on_ready() -> None:
 
 lmcord_group = app_commands.Group(name="lmcord", description="LMcordの操作コマンド")
 
-
-@lmcord_group.command(name="help", description="現在の設定とヘルプを表示")
-async def llmcord_help(interaction: discord.Interaction):
-    help_text = build_help_message(interaction.channel_id)
-    await interaction.response.send_message(help_text, ephemeral=True)
+# Profile subcommand group
+profile_group = app_commands.Group(name="profile", description="プロファイル管理", parent=lmcord_group)
 
 
-@lmcord_group.command(name="profiles", description="利用可能なプロファイル一覧を表示")
-async def llmcord_profiles(interaction: discord.Interaction):
+@profile_group.command(name="list", description="利用可能なプロファイル一覧を表示")
+async def profile_list(interaction: discord.Interaction):
     channel_id = interaction.channel_id
     active_default = ACTIVE_PROFILE_NAME or "(none)"
     active_channel = CHANNEL_PROFILE_OVERRIDES.get(channel_id) if channel_id else None
@@ -1202,12 +1212,12 @@ async def llmcord_profiles(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-@lmcord_group.command(name="switch", description="このチャンネルのプロファイルを切り替え")
+@profile_group.command(name="switch", description="このチャンネルのプロファイルを切り替え")
 @app_commands.describe(profile="切り替え先プロファイル")
 @app_commands.choices(profile=[
     app_commands.Choice(name=name, value=name) for name in list_profiles()
 ])
-async def llmcord_switch(interaction: discord.Interaction, profile: str):
+async def profile_switch(interaction: discord.Interaction, profile: str):
     if not interaction.channel_id:
         await interaction.response.send_message("チャンネル情報が取得できませんでした。", ephemeral=True)
         return
@@ -1216,6 +1226,67 @@ async def llmcord_switch(interaction: discord.Interaction, profile: str):
         await interaction.response.send_message(f"このチャンネルのプロファイルを '{profile}' に切り替えました。")
     except Exception as exc:
         await interaction.response.send_message(f"切り替えに失敗しました: {exc}", ephemeral=True)
+
+
+@profile_group.command(name="reset", description="このチャンネルのプロファイルをリセット")
+async def profile_reset(interaction: discord.Interaction):
+    if interaction.channel_id in CHANNEL_PROFILE_OVERRIDES:
+        del CHANNEL_PROFILE_OVERRIDES[interaction.channel_id]
+        save_channel_profiles()
+    
+    default_profile = ACTIVE_PROFILE_NAME or "(none)"
+    await interaction.response.send_message(f"✅ プロファイルをデフォルト: **{default_profile}**に変更しました。")
+
+
+# Persona subcommand group
+persona_group = app_commands.Group(name="persona", description="ペルソナ管理", parent=lmcord_group)
+
+
+@persona_group.command(name="list", description="利用可能なペルソナ一覧を表示")
+async def persona_list(interaction: discord.Interaction):
+    persona_names = list_personas()
+    current_persona = get_active_persona(interaction.channel_id)
+    
+    persona_list_text = "\n".join([f"• {name}" for name in persona_names])
+    
+    lines = [
+        "🎭 利用可能なペルソナ:",
+        persona_list_text,
+        "",
+        f"📌 現在のペルソナ: **{current_persona}**",
+    ]
+    
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@persona_group.command(name="switch", description="このチャンネルのペルソナを切り替え")
+@app_commands.describe(name="切り替え先ペルソナ")
+@app_commands.choices(name=[
+    app_commands.Choice(name=persona_name, value=persona_name)
+    for persona_name in list_personas()
+])
+async def persona_switch(interaction: discord.Interaction, name: str):
+    try:
+        set_channel_persona(interaction.channel_id, name)
+        await interaction.response.send_message(f"✅ ペルソナを **{name}** に変更しました。")
+    except RuntimeError as e:
+        await interaction.response.send_message(f"❌ エラー: {e}", ephemeral=True)
+
+
+@persona_group.command(name="reset", description="このチャンネルのペルソナをリセット")
+async def persona_reset(interaction: discord.Interaction):
+    if interaction.channel_id in CHANNEL_PERSONA_OVERRIDES:
+        del CHANNEL_PERSONA_OVERRIDES[interaction.channel_id]
+        save_channel_personas()
+    
+    default_persona = get_active_persona(interaction.channel_id)
+    await interaction.response.send_message(f"✅ ペルソナをデフォルト: **{default_persona}**に変更しました。")
+
+
+@lmcord_group.command(name="help", description="現在の設定とヘルプを表示")
+async def llmcord_help(interaction: discord.Interaction):
+    help_text = build_help_message(interaction.channel_id)
+    await interaction.response.send_message(help_text, ephemeral=True)
 
 
 @lmcord_group.command(name="stats", description="月次統計情報を表示")
@@ -1254,60 +1325,6 @@ async def llmcord_stats(interaction: discord.Interaction):
     ]
     
     await interaction.response.send_message("\n".join(stats_lines), ephemeral=True)
-
-
-@lmcord_group.command(name="personas", description="利用可能なペルソナ一覧を表示")
-async def llmcord_personas(interaction: discord.Interaction):
-    """List all available personas and current settings."""
-    persona_names = list_personas()
-    current_persona = get_active_persona(interaction.channel_id)
-    
-    persona_list = "\n".join([f"• {name}" for name in persona_names])
-    
-    lines = [
-        "🎭 利用可能なペルソナ:",
-        persona_list,
-        "",
-        f"📌 現在のペルソナ: **{current_persona}**",
-        "",
-        "ペルソナを切り替えるには: `/lmcord persona <name>`",
-    ]
-    
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
-@lmcord_group.command(name="persona", description="このチャンネルのペルソナを切り替え")
-@app_commands.describe(name="切り替え先ペルソナ")
-@app_commands.choices(name=[
-    app_commands.Choice(name=persona_name, value=persona_name)
-    for persona_name in list_personas()
-])
-async def llmcord_persona(interaction: discord.Interaction, name: str):
-    """Change persona for the current channel."""
-    try:
-        set_channel_persona(interaction.channel_id, name)
-        current_text = PERSONAS.get(name, "（テキストなし）")
-        await interaction.response.send_message(
-            f"✅ ペルソナを **{name}** に変更しました。\n\n{current_text}",
-            ephemeral=True
-        )
-    except RuntimeError as e:
-        await interaction.response.send_message(f"❌ エラー: {e}", ephemeral=True)
-
-
-@lmcord_group.command(name="reset_persona", description="このチャンネルのペルソナをリセット")
-async def llmcord_reset_persona(interaction: discord.Interaction):
-    """Reset persona override for the current channel."""
-    if interaction.channel_id in CHANNEL_PERSONA_OVERRIDES:
-        del CHANNEL_PERSONA_OVERRIDES[interaction.channel_id]
-        save_channel_personas()
-    
-    # Get default persona
-    default_persona = get_active_persona(interaction.channel_id)
-    await interaction.response.send_message(
-        f"✅ ペルソナをリセットしました。デフォルト: **{default_persona}**",
-        ephemeral=True
-    )
 
 
 bot.tree.add_command(lmcord_group)
