@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_GOOGLE = "gemini-2.0-flash-exp"
+DEFAULT_MODEL_GOOGLE = "gemini-2.5-flash-lite"
 DEFAULT_MODEL_OPENAI = "gpt-4o"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
