@@ -56,3 +56,6 @@ htmlcov/
 
 # Docker
 .dockerignore
+
+personas.yaml
+profiles.json

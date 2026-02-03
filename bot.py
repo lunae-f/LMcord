@@ -12,6 +12,7 @@ from typing import List, Optional, Union
 
 import aiohttp
 import discord
+import yaml
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -60,7 +61,6 @@ class Settings:
     enable_web_search: bool
     search_provider: str
     enable_google_grounding: bool
-    persona: Optional[str]
     enable_citation_links: bool
     embed_footer: str
     max_monthly_cost_usd: float
@@ -76,7 +76,6 @@ def load_settings() -> Settings:
     enable_web_search = env_bool("ENABLE_WEB_SEARCH", True)
     search_provider = os.getenv("SEARCH_PROVIDER", "tavily")
     enable_google_grounding = env_bool("ENABLE_GOOGLE_GROUNDING", True)
-    persona = os.getenv("PERSONA")
     enable_citation_links = env_bool("ENABLE_CITATION_LINKS", False)
     embed_footer = os.getenv("EMBED_FOOTER", "[LMcord](https://github.com/lunae-f/LMcord), made with ❤️‍🔥 by Lunae. | MIT License")
     max_monthly_cost_usd = float(os.getenv("MAX_MONTHLY_COST_USD", "0"))
@@ -90,7 +89,6 @@ def load_settings() -> Settings:
         enable_web_search=enable_web_search,
         search_provider=search_provider,
         enable_google_grounding=enable_google_grounding,
-        persona=persona,
         enable_citation_links=enable_citation_links,
         embed_footer=embed_footer,
         max_monthly_cost_usd=max_monthly_cost_usd,
@@ -112,13 +110,18 @@ class Profile:
     base_url: Optional[str]
     input_cost_per_1m: float
     output_cost_per_1m: float
+    persona_name: Optional[str] = None
 
 
 PROFILES_FILE = "profiles.json"
 CHANNEL_PROFILES_FILE = "data/channel_profiles.json"
+PERSONAS_FILE = "personas.yaml"
+CHANNEL_PERSONAS_FILE = "data/channel_personas.json"
 PROFILES: dict[str, Profile] = {}
 ACTIVE_PROFILE_NAME: Optional[str] = None
 CHANNEL_PROFILE_OVERRIDES: dict[int, str] = {}
+PERSONAS: dict[str, str] = {}
+CHANNEL_PERSONA_OVERRIDES: dict[int, str] = {}
 
 
 def resolve_env_value(value: Optional[str]) -> str:
@@ -149,6 +152,7 @@ def load_profiles() -> None:
         base_url = resolve_env_value(p.get("base_url")) or None
         input_cost = float(p.get("input_cost_per_1m", 0))
         output_cost = float(p.get("output_cost_per_1m", 0))
+        persona_name = p.get("persona_name")
         if not name or not platform or not model:
             raise RuntimeError("Each profile must include name, platform, model")
         if platform not in {"google", "openai"}:
@@ -164,6 +168,7 @@ def load_profiles() -> None:
             base_url=base_url,
             input_cost_per_1m=input_cost,
             output_cost_per_1m=output_cost,
+            persona_name=persona_name,
         )
     PROFILES = loaded
     if not PROFILES:
@@ -214,6 +219,86 @@ def set_channel_profile(channel_id: int, profile_name: str) -> None:
     save_channel_profiles()
 
 
+def load_personas() -> None:
+    """Load personas from YAML file."""
+    global PERSONAS
+    if not os.path.exists(PERSONAS_FILE):
+        logger.warning(f"{PERSONAS_FILE} が見つかりません。デフォルトペルソナのみ使用します。")
+        PERSONAS = {
+            "default": "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。\n推測を避け、わからない場合はわからないと伝えてください。"
+        }
+        return
+    try:
+        with open(PERSONAS_FILE, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                raise ValueError("personas.yaml must be a dictionary")
+            PERSONAS = data
+            if "default" not in PERSONAS:
+                logger.warning("personas.yaml に 'default' が定義されていません。デフォルトペルソナを追加します。")
+                PERSONAS["default"] = "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。\n推測を避け、わからない場合はわからないと伝えてください。"
+            logger.info(f"ペルソナを読み込みました: {len(PERSONAS)}件")
+    except Exception as e:
+        logger.error(f"ペルソナファイルの読み込みに失敗しました: {e}")
+        PERSONAS = {
+            "default": "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。\n推測を避け、わからない場合はわからないと伝えてください。"
+        }
+
+
+def load_channel_personas() -> None:
+    """Load channel persona overrides from file."""
+    global CHANNEL_PERSONA_OVERRIDES
+    if not os.path.exists(CHANNEL_PERSONAS_FILE):
+        return
+    try:
+        with open(CHANNEL_PERSONAS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            CHANNEL_PERSONA_OVERRIDES = {int(k): v for k, v in data.items()}
+            logger.info(f"チャンネルペルソナ設定を読み込みました: {len(CHANNEL_PERSONA_OVERRIDES)}件")
+    except Exception as e:
+        logger.error(f"チャンネルペルソナの読み込みに失敗しました: {e}")
+
+
+def save_channel_personas() -> None:
+    """Save channel persona overrides to file."""
+    ensure_data_dir()
+    try:
+        with open(CHANNEL_PERSONAS_FILE, "w", encoding="utf-8") as f:
+            json.dump(CHANNEL_PERSONA_OVERRIDES, f)
+    except Exception as e:
+        logger.error(f"チャンネルペルソナの保存に失敗しました: {e}")
+
+
+def set_channel_persona(channel_id: int, persona_name: str) -> None:
+    """Set persona override for a specific channel."""
+    if persona_name not in PERSONAS:
+        raise RuntimeError(f"Unknown persona: {persona_name}")
+    CHANNEL_PERSONA_OVERRIDES[channel_id] = persona_name
+    save_channel_personas()
+
+
+def get_active_persona(channel_id: Optional[int] = None) -> str:
+    """Get active persona name for the channel with priority: channel override > profile > default."""
+    # Priority 1: Channel-specific persona override
+    if channel_id is not None and channel_id in CHANNEL_PERSONA_OVERRIDES:
+        persona_name = CHANNEL_PERSONA_OVERRIDES[channel_id]
+        if persona_name in PERSONAS:
+            return persona_name
+    
+    # Priority 2: Profile-specific persona
+    profile = get_active_profile(channel_id)
+    if profile.persona_name and profile.persona_name in PERSONAS:
+        return profile.persona_name
+    
+    # Priority 3: Default persona
+    return "default"
+
+
+def list_personas() -> List[str]:
+    """List all available persona names."""
+    return list(PERSONAS.keys())
+
+
 def list_profiles() -> List[str]:
     return list(PROFILES.keys())
 
@@ -228,6 +313,8 @@ if not DISCORD_TOKEN:
 
 load_profiles()
 load_channel_profiles()
+load_personas()
+load_channel_personas()
 
 GOOGLE_CLIENTS: dict[str, genai.Client] = {}
 OPENAI_CLIENTS: dict[tuple[str, str], OpenAI] = {}
@@ -416,17 +503,23 @@ async def update_bot_status(tokens_data: dict) -> None:
     await client.change_presence(activity=activity)
 
 
-def build_system_prompt() -> str:
-    # If persona is set, use only the persona
-    if SETTINGS.persona:
-        return SETTINGS.persona
+def build_system_prompt(channel_id: Optional[int] = None) -> str:
+    """Build system prompt based on active persona."""
+    persona_name = get_active_persona(channel_id)
+    persona_text = PERSONAS.get(persona_name)
     
-    # Otherwise, use default assistant prompt
+    if persona_text:
+        # Add web search instruction if enabled
+        if SETTINGS.enable_web_search or SETTINGS.enable_google_grounding:
+            return persona_text + "\n必要に応じてウェブ検索ツールを使用し、最新の情報を取得してください。"
+        return persona_text
+    
+    # Fallback to hardcoded default if persona not found
+    logger.warning(f"ペルソナ '{persona_name}' が見つかりません。デフォルトを使用します。")
     base_prompt = "あなたはDiscordのアシスタントです。日本語で、丁寧かつ正確さ重視で回答してください。"
     if SETTINGS.enable_web_search or SETTINGS.enable_google_grounding:
         base_prompt += "\n必要に応じてウェブ検索ツールを使用し、最新の情報を取得してください。"
     base_prompt += "\n推測を避け、わからない場合はわからないと伝えてください。"
-    
     return base_prompt
 
 
@@ -665,13 +758,12 @@ def build_help_message(channel_id: Optional[int] = None) -> str:
     else:
         settings_lines.append("- 添付ファイル入力: 無効（OpenAIでは添付不可）")
     
-    # ペルソナを全文表示
-    if SETTINGS.persona:
-        settings_lines.extend([
-            "",
-            "【ペルソナ設定】",
-            SETTINGS.persona,
-        ])
+    # ペルソナ表示
+    active_persona_name = get_active_persona(channel_id)
+    settings_lines.extend([
+        "",
+        f"【ペルソナ】{active_persona_name}",
+    ])
     
     settings_lines.extend([
         "",
@@ -822,7 +914,7 @@ async def build_messages_google(message: discord.Message, prompt: str, profile: 
     estimated_input_tokens = 0
     
     # System instruction part
-    system_parts = [build_system_prompt()]
+    system_parts = [build_system_prompt(message.channel.id)]
     
     # Reply chain
     reply_chain = await fetch_reply_chain(message, SETTINGS.reply_chain_limit)
@@ -872,7 +964,7 @@ async def build_messages_google(message: discord.Message, prompt: str, profile: 
 
 
 async def build_messages_openai(message: discord.Message, prompt: str, profile: Profile) -> List[dict]:
-    messages: List[dict] = [{"role": "system", "content": build_system_prompt()}]
+    messages: List[dict] = [{"role": "system", "content": build_system_prompt(message.channel.id)}]
 
     reply_chain = await fetch_reply_chain(message, SETTINGS.reply_chain_limit)
     if reply_chain:
@@ -1162,6 +1254,60 @@ async def llmcord_stats(interaction: discord.Interaction):
     ]
     
     await interaction.response.send_message("\n".join(stats_lines), ephemeral=True)
+
+
+@lmcord_group.command(name="personas", description="利用可能なペルソナ一覧を表示")
+async def llmcord_personas(interaction: discord.Interaction):
+    """List all available personas and current settings."""
+    persona_names = list_personas()
+    current_persona = get_active_persona(interaction.channel_id)
+    
+    persona_list = "\n".join([f"• {name}" for name in persona_names])
+    
+    lines = [
+        "🎭 利用可能なペルソナ:",
+        persona_list,
+        "",
+        f"📌 現在のペルソナ: **{current_persona}**",
+        "",
+        "ペルソナを切り替えるには: `/lmcord persona <name>`",
+    ]
+    
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@lmcord_group.command(name="persona", description="このチャンネルのペルソナを切り替え")
+@app_commands.describe(name="切り替え先ペルソナ")
+@app_commands.choices(name=[
+    app_commands.Choice(name=persona_name, value=persona_name)
+    for persona_name in list_personas()
+])
+async def llmcord_persona(interaction: discord.Interaction, name: str):
+    """Change persona for the current channel."""
+    try:
+        set_channel_persona(interaction.channel_id, name)
+        current_text = PERSONAS.get(name, "（テキストなし）")
+        await interaction.response.send_message(
+            f"✅ ペルソナを **{name}** に変更しました。\n\n{current_text}",
+            ephemeral=True
+        )
+    except RuntimeError as e:
+        await interaction.response.send_message(f"❌ エラー: {e}", ephemeral=True)
+
+
+@lmcord_group.command(name="reset_persona", description="このチャンネルのペルソナをリセット")
+async def llmcord_reset_persona(interaction: discord.Interaction):
+    """Reset persona override for the current channel."""
+    if interaction.channel_id in CHANNEL_PERSONA_OVERRIDES:
+        del CHANNEL_PERSONA_OVERRIDES[interaction.channel_id]
+        save_channel_personas()
+    
+    # Get default persona
+    default_persona = get_active_persona(interaction.channel_id)
+    await interaction.response.send_message(
+        f"✅ ペルソナをリセットしました。デフォルト: **{default_persona}**",
+        ephemeral=True
+    )
 
 
 bot.tree.add_command(lmcord_group)

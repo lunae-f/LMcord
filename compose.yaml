@@ -13,10 +13,10 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL}
       - CHANNEL_HISTORY_LIMIT=${CHANNEL_HISTORY_LIMIT:-50}
       - REPLY_CHAIN_LIMIT=${REPLY_CHAIN_LIMIT:-50}
-      - PERSONA=${PERSONA}
       - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-true}
       - SEARCH_PROVIDER=${SEARCH_PROVIDER:-tavily}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
     volumes:
       - ./data:/app/data
+      - ./personas.yaml:/app/personas.yaml
       - ./profiles.json:/app/profiles.json
